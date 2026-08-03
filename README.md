@@ -220,6 +220,14 @@ launch is silent and you cannot tell success from failure.
 Everything is overridable by environment variable: `SNAPX_REGISTRY`,
 `SNAPX_OUTPUT`, `SNAPX_LEADER` (default `SUPER SHIFT, E`), `SNAPX_SCRIPT`.
 
+The leader is a single `exec` binding that shows the menu and enters the submap.
+Hyprland runs only the **first** bind registered for a key combination, so a
+separate `submap` bind plus a `notify-send` bind would enter the modal state and
+never show the menu — looking exactly like the keybind doing nothing.
+
+Run `~/.config/snap-extract/snapx-menu.sh` directly to test the menu without
+touching the keyboard.
+
 The generator refuses duplicate keys, rejects multi-character keys, and warns
 about paths that do not exist rather than silently producing dead bindings.
 
