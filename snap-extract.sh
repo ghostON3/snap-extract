@@ -25,6 +25,7 @@ OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
 MAX_DEPTH=8
 RECURSIVE=0
 DEBUG=0
+NOTIFY=0
 # Directories never worth concatenating — pruned in recursive folder mode.
 PRUNE_DIRS=".git,node_modules,dist,build,out,.next,.turbo,.svelte-kit,coverage,__pycache__,.venv,venv,target,vendor"
 
@@ -70,6 +71,8 @@ OPTIONS
   --model NAME        Vision model. Default: qwen3-vl:8b
   --ollama-host URL   Default: http://localhost:11434
   --debug             Log OCR output and promotion decisions to stderr.
+  --notify            Desktop notification with the result. Use this in
+                      compositor keybinds, where there is no terminal to read.
   -h, --help          This text.
 
 EXAMPLES
@@ -119,6 +122,7 @@ while [[ $# -gt 0 ]]; do
     -r|--recursive) RECURSIVE=1; shift ;;
     --prune)       PRUNE_DIRS="$2"; shift 2 ;;
     --debug)       DEBUG=1; shift ;;
+    --notify)      NOTIFY=1; shift ;;
     -h|--help)     usage 0 ;;
     *)
       echo "snap-extract: unknown argument: $1" >&2
@@ -133,6 +137,26 @@ done
 
 log() { [[ $DEBUG -eq 1 ]] && echo "[snap-extract] $*" >&2 || true; }
 
+# When launched from a compositor keybind there is no terminal to read, so a
+# failure is otherwise completely silent — you cannot tell "copied 40 files"
+# from "copied nothing". urgency=critical on failure so it does not auto-dismiss.
+notify() {
+  [[ $NOTIFY -eq 1 ]] || return 0
+  command -v notify-send &>/dev/null || return 0
+  local urgency="$1" title="$2" body="$3"
+  notify-send -a snap-extract -u "$urgency" "$title" "$body" 2>/dev/null || true
+}
+
+# Failure exits are scattered; route them all through here so --notify covers
+# every one of them rather than only the last.
+die() {
+  local code="$1" msg="$2" detail="${3:-}"
+  echo "snap-extract: $msg" >&2
+  [[ -n "$detail" ]] && echo "  $detail" >&2
+  notify critical "snap-extract: nothing copied" "${detail:-$msg}"
+  exit "$code"
+}
+
 # ── Step 1: get an image (if needed) ────────────────────────────────────────
 if [[ "$MODE" == "screenshot" ]]; then
   IMAGE="$(mktemp --suffix=.png)"
@@ -143,9 +167,9 @@ if [[ "$MODE" == "screenshot" ]]; then
   elif command -v scrot &>/dev/null; then
     scrot -s "$IMAGE"
   else
-    echo "no screenshot tool (need grim+slurp or scrot)" >&2; exit 1
+    die 2 "no screenshot tool" "Install grim + slurp (Wayland) or scrot (X11)."
   fi
-  [[ -s "$IMAGE" ]] || { echo "screenshot empty / cancelled" >&2; exit 1; }
+  [[ -s "$IMAGE" ]] || die 3 "screenshot cancelled" "No region was selected."
   MODE="image"
 fi
 
@@ -314,17 +338,17 @@ resolve_in_root_any_depth() {
 
 case "$MODE" in
   image)
-    [[ -f "$IMAGE" ]] || { echo "image not found: $IMAGE" >&2; exit 1; }
+    [[ -f "$IMAGE" ]] || die 2 "image not found: $IMAGE"
     log "identification on $IMAGE (backend=$BACKEND)"
     case "$BACKEND" in
       tesseract)
-        raw="$(identify_via_tesseract "$IMAGE")" || { echo "tesseract failed" >&2; exit 2; }
+        raw="$(identify_via_tesseract "$IMAGE")" || die 3 "OCR failed" "tesseract could not read the image. Re-run with --debug."
         ;;
       vision)
-        raw="$(identify_via_vision "$IMAGE")" || { echo "vision call failed" >&2; exit 2; }
+        raw="$(identify_via_vision "$IMAGE")" || die 3 "vision backend failed" "Is Ollama running at $OLLAMA_HOST?"
         ;;
       *)
-        echo "unknown backend: $BACKEND (use tesseract or vision)" >&2; exit 1
+        die 2 "unknown backend: $BACKEND" "Use tesseract or vision."
         ;;
     esac
     log "raw identification output:"
@@ -377,7 +401,7 @@ case "$MODE" in
     fi
     ;;
   folder)
-    [[ -d "$FOLDER" ]] || { echo "folder not found: $FOLDER" >&2; exit 1; }
+    [[ -d "$FOLDER" ]] || die 2 "folder not found: $FOLDER"
     ROOT="${FOLDER%/}"
     while IFS= read -r f; do
       [[ -n "$f" ]] && FILES+=("$f")
@@ -397,14 +421,10 @@ case "$MODE" in
 esac
 
 if [[ ${#FILES[@]} -eq 0 ]]; then
-  {
-    echo "snap-extract: nothing identified."
-    case "$MODE" in
-      image) echo "  OCR found no names matching --ext '$EXTS'. Re-run with --debug to see what it read." ;;
-      *)     echo "  No files matching --ext '$EXTS' under $ROOT. Add -r to recurse into subdirectories." ;;
-    esac
-  } >&2
-  exit 3
+  case "$MODE" in
+    image) die 3 "nothing identified" "OCR found no names matching '$EXTS'. Re-run with --debug to see what it read." ;;
+    *)     die 3 "nothing identified" "No '$EXTS' files under $ROOT. Add -r to recurse into subdirectories." ;;
+  esac
 fi
 
 # ── Step 3: resolve + filter ────────────────────────────────────────────────
@@ -465,9 +485,9 @@ for name in "${FILES[@]}"; do
 done
 
 if [[ ${#RESOLVED[@]} -eq 0 ]]; then
-  echo "no files resolvable against --root=$ROOT" >&2
   printf '  ?? %s\n' "${SKIPPED[@]}" >&2
-  exit 3
+  die 3 "no files resolvable against --root=$ROOT" \
+    "${#SKIPPED[@]} name(s) identified, none found on disk. Is --root pointing at the right project?"
 fi
 
 # ── Step 4: concat ──────────────────────────────────────────────────────────
@@ -493,7 +513,7 @@ case "$OUTPUT" in
     elif command -v pbcopy &>/dev/null; then
       pbcopy < "$out_tmp"
     else
-      echo "no clipboard tool found" >&2; exit 1
+      die 2 "no clipboard tool" "Install wl-clipboard, xclip, or use --output stdout."
     fi
     ;;
   stdout)
@@ -510,6 +530,16 @@ esac
   for p in "${RESOLVED[@]}"; do printf '  ✓ %s\n' "$p"; done
   for s in "${SKIPPED[@]}"; do printf '  ✗ %s\n' "$s"; done
 } >&2
+
+# Rough token estimate: ~4 characters per token is the usual rule of thumb for
+# code. It is the number that actually decides whether this fits in a context
+# window, so it belongs in the notification more than the byte count does.
+human_size="$(awk -v b="$bytes" 'BEGIN{ if (b<1024) printf "%d B", b;
+  else if (b<1048576) printf "%.1f KB", b/1024; else printf "%.1f MB", b/1048576 }')"
+approx_tokens="$(awk -v b="$bytes" 'BEGIN{ t=b/4;
+  if (t<1000) printf "%d", t; else printf "%.0fk", t/1000 }')"
+notify normal "snap-extract → ${OUTPUT}" \
+  "${#RESOLVED[@]} files · ${human_size} · ~${approx_tokens} tokens"
 
 rm -f "$out_tmp"
 # Only clean up the screenshot we captured ourselves — a user-supplied

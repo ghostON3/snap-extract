@@ -178,7 +178,52 @@ Pruned by default when recursing: `.git`, `node_modules`, `dist`, `build`,
 - **`vision`** — `qwen3-vl:8b` via a local Ollama. 2–4 s on GPU, 60–300 s on
   CPU. Only worth it for semantic instructions. Prompt in `prompts/identify.txt`.
 
-## Compositor keybind
+## Project macros (Hyprland submap)
+
+A leader key opens a project menu; one more key picks the project. Register the
+projects you actually work in and each gets a two-key chord.
+
+```sh
+mkdir -p ~/.config/snap-extract
+cp contrib/hypr/projects.conf.example ~/.config/snap-extract/projects.conf
+$EDITOR ~/.config/snap-extract/projects.conf
+contrib/hypr/snapx-keybinds.sh
+```
+
+The registry is one line per project:
+
+```
+# key | label | path | extensions [| extra flags]
+s | strojx  | ~/projects/strojx           | .ts,.tsx,.json,.md | --exclude "*.test.ts"
+e | elo v2  | ~/projects/elo-evolution-v2 | .ts,.tsx,.md
+n | notes   | ~/notes                     | .md
+```
+
+The generator writes `~/.config/hypr/conf.d/snap-extract.conf`. Add
+`source = ~/.config/hypr/conf.d/snap-extract.conf` to `hyprland.conf` once,
+then `hyprctl reload`. Re-run the generator after editing the registry — the
+output is overwritten every time, so edit the registry, never the output.
+
+Then:
+
+| Press | Result |
+| --- | --- |
+| `Super+Shift+E` | menu opens; a notification lists your projects |
+| `s` | screenshot a file tree inside *strojx* |
+| `Shift+s` | copy the whole *strojx* tree — no screenshot |
+| `Escape` or `q` | cancel |
+
+Each generated binding carries `--notify`, so you get a desktop notification
+with the file count, size and a rough token estimate — without it a keybind
+launch is silent and you cannot tell success from failure.
+
+Everything is overridable by environment variable: `SNAPX_REGISTRY`,
+`SNAPX_OUTPUT`, `SNAPX_LEADER` (default `SUPER SHIFT, E`), `SNAPX_SCRIPT`.
+
+The generator refuses duplicate keys, rejects multi-character keys, and warns
+about paths that do not exist rather than silently producing dead bindings.
+
+## Compositor keybind (single project)
 
 Hyprland:
 
