@@ -1,0 +1,27 @@
+# snap-extract project registry
+#
+# Copy to ~/.config/snap-extract/projects.conf, edit, then run:
+#   contrib/hypr/snapx-keybinds.sh
+#
+# One project per line, pipe-separated:
+#
+#   key | label | path | extensions [| extra flags]
+#
+#   key         the letter you press after the leader key. Must be unique.
+#   label       shown in the on-screen menu.
+#   path        project root. ~ is expanded.
+#   extensions  comma-separated, passed to --ext.
+#   extra       optional; any further snap-extract flags for this project.
+#
+# Blank lines and # comments are ignored.
+#
+# Each project gets two bindings:
+#   <key>          screenshot a file tree inside that project
+#   SHIFT <key>    copy the project's whole tree, no screenshot
+#
+# Keep the letter mnemonic — you are choosing these to be muscle memory.
+
+s | strojx      | ~/projects/strojx           | .ts,.tsx,.json,.md | --exclude "*.test.ts"
+e | elo v2      | ~/projects/elo-evolution-v2 | .ts,.tsx,.md
+d | dotfiles    | ~/projects/ghost-dotfiles   | .sh,.conf,.zsh,.md
+n | notes       | ~/notes                     | .md
