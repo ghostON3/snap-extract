@@ -99,17 +99,81 @@ if [[ "$MODE" == "screenshot" ]]; then
 fi
 
 # ── Step 2a: identify file names via tesseract (fast, CPU) ─────────────────
+
+# Tesseract is trained on large, dark-on-light text. An editor sidebar is the
+# opposite on every dark theme: ~13px light glyphs on a dark background. Fed
+# raw, it drops the dot before the extension ("contract.ts" → "contractts"),
+# which the extension regex then rejects — so a whole screenshot yields
+# nothing. Normalising the image first is the difference between unusable and
+# reliable, so do it whenever ImageMagick is available.
+preprocess_for_ocr() {
+  local src="$1" dst="$2" im=""
+  if command -v magick &>/dev/null; then im="magick"
+  elif command -v convert &>/dev/null; then im="convert"
+  else return 1; fi
+
+  local mean
+  mean="$("$im" "$src" -colorspace Gray -format "%[fx:mean]" info: 2>/dev/null)" || return 1
+  [[ -n "$mean" ]] || return 1
+
+  # Mean luminance below half means light-on-dark: flip it.
+  local -a negate=()
+  if awk "BEGIN{exit !($mean < 0.5)}" 2>/dev/null; then
+    negate=(-negate)
+    log "preprocess: dark background (mean=$mean) → inverting"
+  fi
+  "$im" "$src" -colorspace Gray ${negate[@]+"${negate[@]}"} \
+    -resize 400% -sharpen 0x1 "$dst" 2>/dev/null || return 1
+  return 0
+}
+
 identify_via_tesseract() {
   local img="$1"
   command -v tesseract &>/dev/null || { echo "tesseract not installed" >&2; return 2; }
+
+  local ocr_src="$img" prepped=""
+  prepped="$(mktemp --suffix=.png)"
+  if preprocess_for_ocr "$img" "$prepped"; then
+    ocr_src="$prepped"
+    log "preprocess: grayscale + 4x upscale + sharpen"
+  else
+    log "preprocess: skipped (ImageMagick unavailable) — OCR accuracy will suffer"
+  fi
+
+  # --psm 6 ("uniform block of text") beats the default auto-segmentation on a
+  # narrow column of filenames; fall back to auto if it comes back empty.
   local raw
-  raw="$(tesseract "$img" - 2>/dev/null)" || return 2
+  raw="$(tesseract "$ocr_src" - --psm 6 2>/dev/null)" || raw=""
+  # Plain `[[ ... ]] && x` would return 1 when the test is false, and `set -e`
+  # kills the script on that. Use a real if.
+  if [[ -z "${raw//[[:space:]]/}" ]]; then
+    raw="$(tesseract "$ocr_src" - 2>/dev/null)" || raw=""
+  fi
+  rm -f "$prepped"
+  [[ -n "${raw//[[:space:]]/}" ]] || return 2
+
   # Build a regex from --ext (".md,.sh" → "\.md|\.sh") and extract tokens
   # that look like file names (basename + extension). Limit to plausible
   # name chars to avoid pulling whole sentences.
-  local ext_regex
+  local ext_regex bare_regex
   ext_regex="$(echo "$EXTS" | sed -E 's/[, ]+/|/g; s/\./\\./g')"
-  echo "$raw" | grep -oE "[A-Za-z0-9][A-Za-z0-9_.+-]{0,100}(${ext_regex})" | sort -u
+  # Same list without the dots, for recovering names whose dot the OCR ate.
+  bare_regex="$(echo "$EXTS" | sed -E 's/[, ]+/|/g; s/\.//g')"
+  # Every grep here needs `|| true`: a grep that matches nothing exits 1, and
+  # under `pipefail` that failure propagates out as the function's status —
+  # which the caller reports as "tesseract failed" even when the other branch
+  # found plenty. Once preprocessing works, the recovery branch matching
+  # nothing is the *normal* case, so this is not a corner case at all.
+  local primary recovered
+  primary="$(grep -oE "[A-Za-z0-9][A-Za-z0-9_.+-]{0,100}(${ext_regex})" <<<"$raw" || true)"
+  # Dot recovery: "contractts" → "contract.ts". Also handles the variant where
+  # OCR turns the dot into a space ("dark ts"). False positives are free — a
+  # name that doesn't exist on disk is discarded downstream.
+  recovered="$(sed -E "s/([A-Za-z0-9])[[:space:]]+(${bare_regex})\b/\1.\2/g" <<<"$raw" \
+    | { grep -oE "[A-Za-z0-9][A-Za-z0-9_+-]{0,100}(${bare_regex})\b" || true; } \
+    | sed -E "s/(${bare_regex})$/.\1/" || true)"
+
+  printf '%s\n%s\n' "$primary" "$recovered" | { grep -v '^[[:space:]]*$' || true; } | sort -u
 }
 
 # ── Step 2b: identify file names via vision (qwen3-vl, slow on CPU) ────────
@@ -389,5 +453,10 @@ esac
 rm -f "$out_tmp"
 # Only clean up the screenshot we captured ourselves — a user-supplied
 # --image is theirs, even when it lives in /tmp.
-[[ ${IMAGE_IS_TEMP:-0} -eq 1 ]] && rm -f "$IMAGE"
+# Must be an `if`, not `[[ ... ]] && rm`: as the final statement under `set -e`
+# a false test would make a perfectly successful run exit non-zero.
+if [[ ${IMAGE_IS_TEMP:-0} -eq 1 ]]; then
+  rm -f "$IMAGE"
+fi
+exit 0
 exit 0

@@ -42,9 +42,10 @@ Dependencies:
 | screenshot          | `grim` + `slurp`           | `scrot`          |
 | clipboard           | `wl-clipboard` (`wl-copy`) | `xclip`          |
 | OCR                 | `tesseract` + a language pack             |
+| preprocessing       | `imagemagick` — strongly recommended, see Backends |
 | runtime             | `bash >= 4`, `python3` (vision backend only) |
 
-Arch: `pacman -S grim slurp wl-clipboard tesseract tesseract-data-eng`
+Arch: `pacman -S grim slurp wl-clipboard tesseract tesseract-data-eng imagemagick`
 
 ## Modes
 
@@ -92,6 +93,14 @@ Pruned by default when recursing: `.git`, `node_modules`, `dist`, `build`,
 
 - **`tesseract`** (default) — pure CPU OCR, ~1–4 s. Pulls tokens matching your
   `--ext` list out of the OCR'd text. Misses plenty; auto-promotion covers it.
+
+  The image is normalised first, which matters more than it sounds. Tesseract
+  expects large dark-on-light text; an editor sidebar on a dark theme is ~13px
+  light-on-dark, and fed raw it drops the dot before the extension
+  (`contract.ts` → `contractts`) so the extension filter rejects everything.
+  snap-extract converts to grayscale, inverts when the background is dark,
+  upscales 4× and sharpens before running OCR in single-block mode. Install
+  ImageMagick — without it accuracy on real sidebars collapses.
 - **`vision`** — `qwen3-vl:8b` via a local Ollama. 2–4 s on GPU, 60–300 s on
   CPU. Only worth it for semantic instructions. Prompt in `prompts/identify.txt`.
 
