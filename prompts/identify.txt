@@ -1,0 +1,12 @@
+List every file or folder NAME visible in this screenshot.
+
+Look at: file explorers / sidebars / tabs / breadcrumbs / outline panels.
+
+Rules:
+- Output ONE name per line.
+- Strip leading icons, bullets, indent characters.
+- Include extensions if shown (foo.md not foo).
+- Names that are truncated with ellipsis (e.g. "05-editor-multiverse...") — output the visible stem AS-IS; the downstream tool will resolve it against the folder.
+- Do NOT add commentary, headings, markdown, or bullets.
+- Do NOT output the file content itself.
+- Do NOT think out loud.
