@@ -12,6 +12,10 @@ Everything runs locally. No cloud calls, no API keys.
 snap-extract.sh --screenshot --root ~/projects/my-app --ext ".ts,.md"
 ```
 
+Folder mode, no screenshot involved:
+
+![snap-extract folder mode](assets/cli.gif)
+
 ## The idea
 
 OCR on a file sidebar is unreliable — names get truncated with ellipses, narrow

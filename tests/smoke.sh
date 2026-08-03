@@ -57,6 +57,14 @@ grep -q "deep.ts" <<<"$out" \
   && bad "exclude" "deep.ts survived an explicit exclude" \
   || ok "exclude: basename glob matches nested paths"
 
+# ── relative --folder path ─────────────────────────────────────────────────
+# Regression: collection emits absolute paths, resolve() looked names up as
+# "$ROOT/$name". With a relative --folder every file came back unresolved.
+out="$(cd "$TREE" && "$SCRIPT" --folder alpha -r --ext .ts --output stdout 2>/dev/null)"
+[[ "$(count_files "$out")" == "2" ]] \
+  && ok "relative --folder path resolves" \
+  || bad "relative --folder" "expected 2 files, got $(count_files "$out")"
+
 # ── explicit paths ─────────────────────────────────────────────────────────
 out="$(run --paths "solo.ts" --root "$TREE" --ext .ts)"
 grep -q "beta-solo" <<<"$out" \

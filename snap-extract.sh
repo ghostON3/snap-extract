@@ -137,6 +137,18 @@ done
 
 log() { [[ $DEBUG -eq 1 ]] && echo "[snap-extract] $*" >&2 || true; }
 
+# Collection emits absolute paths (find echoes its starting point verbatim), but
+# resolve() looks names up as "$ROOT/$name". With a relative --folder the two
+# disagree and every file comes back unresolved. Canonicalise up front so both
+# halves always speak absolute paths.
+abs_dir() {
+  local p="$1"
+  [[ -d "$p" ]] && { (cd "$p" && pwd); return 0; }
+  printf '%s' "${p%/}"
+}
+[[ -n "$FOLDER" ]] && FOLDER="$(abs_dir "$FOLDER")"
+ROOT="$(abs_dir "$ROOT")"
+
 # When launched from a compositor keybind there is no terminal to read, so a
 # failure is otherwise completely silent — you cannot tell "copied 40 files"
 # from "copied nothing". urgency=critical on failure so it does not auto-dismiss.
