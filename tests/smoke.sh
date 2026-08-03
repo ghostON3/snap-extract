@@ -69,6 +69,14 @@ grep -q "beta-solo" <<<"$out" \
   && ok "no matches: exits non-zero" \
   || bad "no matches" "expected a non-zero exit"
 
+# ── a successful run exits zero ────────────────────────────────────────────
+# Regression: `[[ ... ]] && rm` as the final statement under `set -e` made
+# every successful non-image run exit 1.
+"$SCRIPT" --folder "$TREE/alpha/src" --ext .ts --output stdout >/dev/null 2>&1
+[[ $? -eq 0 ]] \
+  && ok "success: exits zero" \
+  || bad "success exit code" "a run that produced files still exited non-zero"
+
 # ── auto-promote (needs OCR + an image renderer) ───────────────────────────
 if command -v tesseract &>/dev/null && command -v magick &>/dev/null; then
   IMG="$TREE/shot.png"
@@ -85,6 +93,18 @@ if command -v tesseract &>/dev/null && command -v magick &>/dev/null; then
   [[ -f "$IMG" ]] \
     && ok "cleanup: a user-supplied --image is not deleted" \
     || bad "cleanup" "the script deleted an image it did not create"
+
+  # ── dark theme: the case that made this unusable in practice ─────────────
+  # 13px light-on-dark is what every dark editor theme actually looks like.
+  # Un-preprocessed, tesseract drops the dot before the extension
+  # ("solo.ts" -> "solots") and the extension regex rejects everything.
+  DARK="$TREE/dark.png"
+  magick -size 260x120 xc:"#1e1e1e" -fill "#cccccc" -pointsize 13 \
+    -annotate +20+40 "solo.ts" -annotate +20+70 "index.ts" "$DARK" 2>/dev/null
+  out="$(run --image "$DARK" --root "$TREE/beta" --ext .ts)"
+  [[ "$(count_files "$out")" -ge 2 ]] \
+    && ok "dark theme: small light-on-dark text is recognised" \
+    || bad "dark theme" "expected >=2 files from beta/src, got $(count_files "$out")"
 else
   skip "auto-promote" "needs tesseract + imagemagick"
 fi
