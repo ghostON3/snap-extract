@@ -47,26 +47,100 @@ Dependencies:
 
 Arch: `pacman -S grim slurp wl-clipboard tesseract tesseract-data-eng imagemagick`
 
-## Modes
+> Keep each command on **one line**. Some terminals mangle a pasted multi-line
+> command with backslash continuations — the continuation arrives as a literal
+> character and the script sees it as an unknown argument.
+
+`snap-extract.sh --help` prints the full option list.
+
+## User flows
+
+### 1. Screenshot a file tree → clipboard
+
+The flagship flow. Point at what's on screen instead of typing globs.
 
 ```sh
-# Screenshot a file tree → clipboard
-snap-extract.sh --screenshot --root ~/projects/my-app --ext ".ts,.md"
+snap-extract.sh --screenshot --root ~/projects/my-app --ext ".ts,.tsx"
+```
 
-# Whole directory tree, no screenshot
+The cursor becomes a **crosshair**. Drag a rectangle over your editor's file
+tree, or click once on a window to select the whole thing. `Escape` cancels.
+OCR reads the visible names; the moment one resolves on disk, that entire
+directory is read instead. Then paste with `Ctrl+V`.
+
+Add `--debug 2>/tmp/snap.log` when it misbehaves — the log shows exactly what
+OCR read and which directories it promoted to.
+
+### 2. A whole project or package tree → clipboard
+
+No screenshot involved. This is the flow you want for "give the model my repo".
+
+```sh
 snap-extract.sh --folder ~/projects/my-app/packages -r --ext ".ts,.json"
+```
 
-# Flat directory (immediate children only)
+Without `-r` you get only the immediate children of that directory — which for
+a `packages/` folder containing nothing but subdirectories means no files at all.
+
+### 3. One flat directory
+
+For a folder of notes or chapters, where recursion would pull in noise.
+
+```sh
 snap-extract.sh --folder ~/notes --ext .md
+```
 
-# Explicit paths
-snap-extract.sh --paths "a.md,b.md" --root ~/notes
+### 4. Specific files by name
 
-# Reuse an existing image instead of capturing
-snap-extract.sh --image /tmp/shot.png --root ~/projects/my-app
+When you already know what you want. Names resolve under `--root`, so you don't
+have to type full paths.
 
-# Print instead of touching the clipboard
-snap-extract.sh --folder ~/notes --output stdout
+```sh
+snap-extract.sh --paths "index.ts,config.ts" --root ~/projects/my-app
+```
+
+### 5. Preview before copying
+
+Nothing touches the clipboard with `--output stdout`. Useful for checking the
+size before pasting 400 KB into a chat box.
+
+```sh
+snap-extract.sh --folder ~/projects/my-app -r --ext .ts --output stdout | head -40
+```
+
+### 6. Write to a file
+
+`--output` also takes a path, for building a context file you reuse.
+
+```sh
+snap-extract.sh --folder ~/notes -r --output /tmp/context.md
+```
+
+### 7. Re-run against an image you already have
+
+Skips the capture step. Handy for iterating on `--ext` or `--exclude` without
+re-dragging, and for debugging OCR on a saved screenshot.
+
+```sh
+snap-extract.sh --image /tmp/shot.png --root ~/projects/my-app --ext .ts
+```
+
+### 8. Semantic identification (Ollama)
+
+An alternative to OCR when you need a model to interpret the screenshot rather
+than transcribe it. Requires a local Ollama; slow on CPU.
+
+```sh
+snap-extract.sh --image /tmp/shot.png --root ~/proj --backend vision
+```
+
+### Filtering, in any flow
+
+```sh
+--exclude "*.test.ts,*.snap"   # drop matches (glob; path or basename)
+--include "*.ts"               # keep only matches
+--prune "node_modules,dist"    # directories to skip while recursing
+--max-depth 3                  # how deep -r goes
 ```
 
 ## Options
@@ -117,6 +191,35 @@ Press → drag over the file tree → paste with `Ctrl+V`.
 Keep `--root` scoped to one project. Pointing it at `$HOME` makes every name
 resolution a depth-8 `find` across your entire home directory: slow, and prone
 to matching some unrelated `index.ts` in an archive folder.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `unknown argument: E` (or similar) | a pasted multi-line command lost its `\` continuation | retype on one line |
+| `nothing identified` after `--folder` | the directory holds only subdirectories | add `-r` |
+| `nothing identified` after `--screenshot` | OCR read no name matching `--ext` | `--debug`, check the log; enlarge the region or the editor font |
+| names read, but no `auto-promote` line | `--root` doesn't contain those files | point `--root` at the right project |
+| wrong directory promoted | a same-named file elsewhere resolved first | narrow `--root` |
+| garbage OCR on a dark theme | ImageMagick missing, so preprocessing was skipped | install `imagemagick` |
+
+## Roadmap
+
+Not implemented yet — listed so the gap is explicit rather than discovered.
+
+- **`--dry-run`** — list the files and total size without reading contents, to
+  check scope before filling the clipboard.
+- **Token estimate** in the summary line, since the output usually goes into a
+  model's context window.
+- **`.gitignore` awareness** — currently the prune list is a static default.
+- **Directory-name recognition.** OCR sees folder names too, but only file
+  names participate in resolution today.
+- **Instruction layer** — post-capture text like "skip the tests" applied to the
+  file set, which is the one thing the `vision` backend is genuinely better at.
+- **macOS support** (`screencapture` + `pbcopy`) and a verified X11 path; the
+  X11 branch exists but is lightly tested.
+- **Packaging** — an AUR package and a `snap-extract` binary on `PATH` instead
+  of a cloned script.
 
 ## Known limits
 

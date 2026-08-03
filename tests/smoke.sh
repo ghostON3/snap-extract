@@ -77,6 +77,30 @@ grep -q "beta-solo" <<<"$out" \
   && ok "success: exits zero" \
   || bad "success exit code" "a run that produced files still exited non-zero"
 
+# ── help and invocation errors ─────────────────────────────────────────────
+help_out="$("$SCRIPT" --help 2>/dev/null)"; help_rc=$?
+if [[ $help_rc -eq 0 ]] && grep -q "INPUT MODES" <<<"$help_out"; then
+  ok "--help: prints usage to stdout and exits zero"
+else
+  bad "--help" "exit $help_rc, and/or usage text missing"
+fi
+
+"$SCRIPT" --not-a-flag >/dev/null 2>&1
+[[ $? -eq 2 ]] \
+  && ok "bad argument: exits 2" \
+  || bad "bad argument" "expected exit 2"
+
+err="$("$SCRIPT" --not-a-flag 2>&1 >/dev/null)"
+grep -q "unknown argument" <<<"$err" \
+  && ok "bad argument: names the offending flag on stderr" \
+  || bad "bad argument" "stderr did not name the argument"
+
+# The header comments must never be the help text again — they used to leak
+# internal notes to anyone who mistyped a flag.
+grep -q "Backbone for the Tauri" <<<"$help_out" \
+  && bad "help text" "help is dumping the script's own header comments" \
+  || ok "help: does not dump internal header comments"
+
 # ── auto-promote (needs OCR + an image renderer) ───────────────────────────
 if command -v tesseract &>/dev/null && command -v magick &>/dev/null; then
   IMG="$TREE/shot.png"

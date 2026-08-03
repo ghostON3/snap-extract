@@ -1,39 +1,12 @@
 #!/usr/bin/env bash
-# snap-extract — screenshot → identify files → concat → clipboard.
+# snap-extract — screenshot a file tree, get its contents in your clipboard.
 #
-# Backbone for the Tauri "Snap Extract" popup window. Also usable standalone
-# from a Hyprland keybind or terminal. Stays sovereign — no cloud calls by
-# default.
-#
-# BACKENDS for image → filename identification
-#   tesseract  (default) Pure OCR on CPU, ~1–4 s per screenshot. Pulls strings
-#              matching `--ext` extensions from the OCR'd text. Truncated
-#              names ("05-editor-multivers…") are missed, BUT if ANY name
-#              resolves against --root we auto-promote to folder mode and
-#              read the whole directory — which is what you want most of
-#              the time anyway.
-#   vision     Ollama qwen3-vl:8b. Slow on CPU (60–300 s), ~2–4 s on GPU.
-#              Reserve for semantic tasks (voice exclusion, "skip files
-#              with TODO", etc.). On AMD machines: needs ROCm configured.
-#   paths      Skip identification, use --paths explicitly.
-#   folder     Skip identification, glob --folder.
-#
-# USAGE
-#   snap-extract.sh --screenshot --root /proj            # grim+slurp → tesseract → folder auto-detect
-#   snap-extract.sh --image /tmp/snap.png --root /proj   # use existing screenshot
-#   snap-extract.sh --image X --backend vision           # force qwen3-vl
-#   snap-extract.sh --folder /proj --ext .md             # manual folder mode
-#   snap-extract.sh --folder /proj -r --ext .ts,.md      # whole tree (recursive)
-#   snap-extract.sh --paths "a.md,b.md" --root /proj     # explicit paths
-#   snap-extract.sh --image X --output stdout            # don't touch clipboard
-#   snap-extract.sh --image X --exclude "book.md,*.tmp"  # drop matching files
-#   snap-extract.sh --image X --root ~ --max-depth 8     # resolve names in nested folders
+# Run with --help for usage. Everything runs locally; no cloud calls.
 #
 # EXIT CODES
 #   0  ok
-#   1  bad invocation
-#   2  identification step failed
-#   3  no files identified / readable
+#   2  bad invocation
+#   3  identification step failed / no files readable
 
 set -euo pipefail
 
@@ -55,7 +28,78 @@ DEBUG=0
 # Directories never worth concatenating — pruned in recursive folder mode.
 PRUNE_DIRS=".git,node_modules,dist,build,out,.next,.turbo,.svelte-kit,coverage,__pycache__,.venv,venv,target,vendor"
 
-usage() { sed -n '/^# /,/^$/p' "$0" | head -25; exit 1; }
+usage() {
+  # Help goes to stdout so `--help | less` works; an invocation error sends it
+  # to stderr so it never pollutes --output stdout. Dumping the file's own
+  # header comments (the old behaviour) told the user nothing they needed.
+  local stream=1
+  [[ "${1:-0}" -ne 0 ]] && stream=2
+  cat >&"$stream" <<'HELP'
+snap-extract — screenshot a file tree, get its contents in your clipboard.
+
+USAGE
+  snap-extract.sh --screenshot --root DIR [options]
+  snap-extract.sh --folder DIR [-r] [options]
+  snap-extract.sh --paths "a.ts,b.ts" --root DIR [options]
+  snap-extract.sh --image FILE --root DIR [options]
+
+  Keep the whole command on ONE line. A pasted multi-line command with
+  backslash continuations is mangled by some terminals.
+
+INPUT MODES (choose exactly one)
+  --screenshot        Drag a region with the mouse, then OCR it.
+  --folder DIR        Skip OCR, read DIR directly.
+  --paths "a,b"       Skip OCR, use these names (resolved under --root).
+  --image FILE        OCR an existing image instead of capturing one.
+
+OPTIONS
+  --root DIR          Where filenames are resolved. Default: current directory.
+                      Keep it scoped to one project; pointing it at $HOME is
+                      slow and matches unrelated files.
+  --ext ".ts,.md"     Extensions to include. Default: .md
+  -r, --recursive     Walk the whole tree, not just immediate children.
+  --max-depth N       Depth limit when recursing. Default: 8
+  --prune "a,b"       Directory names to skip when recursing.
+                      Default: .git, node_modules, dist, build, out, .next,
+                      .turbo, .svelte-kit, coverage, __pycache__, .venv, venv,
+                      target, vendor
+  --exclude "*.test.ts"  Drop matching files (glob; matches path or basename).
+  --include "*.ts"    Keep only matching files.
+  --output DEST       clipboard (default) | stdout | a file path
+  --backend NAME      tesseract (default, fast) | vision (local Ollama)
+  --model NAME        Vision model. Default: qwen3-vl:8b
+  --ollama-host URL   Default: http://localhost:11434
+  --debug             Log OCR output and promotion decisions to stderr.
+  -h, --help          This text.
+
+EXAMPLES
+  # Screenshot your editor's file tree into the clipboard
+  snap-extract.sh --screenshot --root ~/projects/app --ext ".ts,.tsx"
+
+  # Whole package tree, straight to the clipboard
+  snap-extract.sh --folder ~/projects/app/packages -r --ext ".ts,.json"
+
+  # Preview what would be copied, without touching the clipboard
+  snap-extract.sh --folder ~/notes --ext .md --output stdout | head -40
+
+  # Write to a file instead
+  snap-extract.sh --folder ~/notes -r --output /tmp/notes.md
+
+  # Skip tests
+  snap-extract.sh --folder ~/projects/app -r --ext .ts --exclude "*.test.ts"
+
+HOW THE SCREENSHOT WORKS
+  --screenshot runs slurp: the cursor becomes a crosshair. Drag a rectangle
+  over your editor's file tree (or click a window to select all of it).
+  Press Escape to cancel. OCR then reads the filenames; as soon as one
+  resolves on disk, its whole directory is read instead — so a few misread
+  names do not matter.
+
+EXIT CODES
+  0  ok    2  bad invocation    3  nothing identified or readable
+HELP
+  exit "${1:-0}"
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -75,8 +119,15 @@ while [[ $# -gt 0 ]]; do
     -r|--recursive) RECURSIVE=1; shift ;;
     --prune)       PRUNE_DIRS="$2"; shift 2 ;;
     --debug)       DEBUG=1; shift ;;
-    -h|--help)     usage ;;
-    *) echo "unknown arg: $1" >&2; usage ;;
+    -h|--help)     usage 0 ;;
+    *)
+      echo "snap-extract: unknown argument: $1" >&2
+      if [[ "$1" == *\\* || "$1" == E ]]; then
+        echo "snap-extract: that looks like a mangled line continuation — retype the command on one line." >&2
+      fi
+      echo >&2
+      usage 2
+      ;;
   esac
 done
 
@@ -339,12 +390,22 @@ case "$MODE" in
     done
     ;;
   *)
-    echo "must pass --screenshot, --image, --folder, or --paths" >&2
-    usage
+    echo "snap-extract: pick an input mode — --screenshot, --folder, --paths, or --image" >&2
+    echo >&2
+    usage 2
     ;;
 esac
 
-[[ ${#FILES[@]} -gt 0 ]] || { echo "no files identified" >&2; exit 3; }
+if [[ ${#FILES[@]} -eq 0 ]]; then
+  {
+    echo "snap-extract: nothing identified."
+    case "$MODE" in
+      image) echo "  OCR found no names matching --ext '$EXTS'. Re-run with --debug to see what it read." ;;
+      *)     echo "  No files matching --ext '$EXTS' under $ROOT. Add -r to recurse into subdirectories." ;;
+    esac
+  } >&2
+  exit 3
+fi
 
 # ── Step 3: resolve + filter ────────────────────────────────────────────────
 resolve() {
