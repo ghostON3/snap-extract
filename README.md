@@ -147,6 +147,10 @@ snap-extract.sh --image /tmp/shot.png --root ~/proj --backend vision
 --max-depth 3                  # how deep -r goes
 ```
 
+Extension matching is case-insensitive, so `.md` also includes files such as
+`README.MD`. For safety, add sensitive formats such as `.env` only when you
+explicitly intend to place their contents on the clipboard.
+
 ## Options
 
 | Flag | Default | Meaning |

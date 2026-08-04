@@ -15,10 +15,13 @@ TREE="$(mktemp -d)"
 trap 'rm -rf "$TREE"' EXIT
 mkdir -p "$TREE/alpha/src/nested" "$TREE/beta/src" "$TREE/beta/node_modules/junk"
 echo "alpha-root"    > "$TREE/alpha/README.md"
+echo "alpha-human"   > "$TREE/alpha/HUMAN.MD"
+echo '{"enabled":true}' > "$TREE/alpha/config.json"
 echo "alpha-index"   > "$TREE/alpha/src/index.ts"
 echo "alpha-nested"  > "$TREE/alpha/src/nested/deep.ts"
 echo "beta-index"    > "$TREE/beta/src/index.ts"
 echo "beta-solo" > "$TREE/beta/src/solo.ts"
+echo "beta-human" > "$TREE/beta/HUMAN.MD"
 echo "should-not-appear" > "$TREE/beta/node_modules/junk/evil.ts"
 
 run() { "$SCRIPT" "$@" --output stdout 2>/dev/null; }
@@ -29,6 +32,15 @@ out="$(run --folder "$TREE/alpha/src" --ext .ts)"
 [[ "$(count_files "$out")" == "1" ]] \
   && ok "flat folder: immediate children only" \
   || bad "flat folder" "expected 1 file, got $(count_files "$out")"
+
+# Extension filters should follow editor/user expectations, not Unix filename
+# casing. Uppercase HUMAN.MD must match a lowercase .md allowlist.
+out="$(run --folder "$TREE/alpha" --ext ".md,.json")"
+if grep -q "alpha-human" <<<"$out" && grep -q 'enabled' <<<"$out"; then
+  ok "extensions: JSON and uppercase Markdown are included"
+else
+  bad "extensions" "expected HUMAN.MD and config.json in output"
+fi
 
 # ── folder mode, recursive ─────────────────────────────────────────────────
 out="$(run --folder "$TREE/alpha" -r --ext .ts)"
@@ -70,6 +82,11 @@ out="$(run --paths "solo.ts" --root "$TREE" --ext .ts)"
 grep -q "beta-solo" <<<"$out" \
   && ok "paths mode: resolves a name under --root" \
   || bad "paths mode" "did not resolve solo.ts"
+
+out="$(run --paths "alpha/HUMAN.MD" --root "$TREE" --ext .md)"
+grep -q "alpha-human" <<<"$out" \
+  && ok "paths mode: extension matching is case-insensitive" \
+  || bad "paths mode case" "HUMAN.MD was rejected by the .md allowlist"
 
 # ── empty result exits non-zero ────────────────────────────────────────────
 "$SCRIPT" --folder "$TREE/alpha" --ext ".nonexistent" --output stdout >/dev/null 2>&1
@@ -125,6 +142,19 @@ if command -v tesseract &>/dev/null && command -v magick &>/dev/null; then
   [[ -f "$IMG" ]] \
     && ok "cleanup: a user-supplied --image is not deleted" \
     || bad "cleanup" "the script deleted an image it did not create"
+
+  # A common basename can exist throughout a monorepo. A uniquely recognised
+  # neighbor should anchor it to the right directory instead of promoting the
+  # first unrelated match returned by find.
+  ANCHORED="$TREE/anchored.png"
+  magick -size 640x160 xc:white -pointsize 34 -fill black \
+    -annotate +25+55 "HUMAN.MD" -annotate +25+110 "config.json" "$ANCHORED" 2>/dev/null
+  out="$(run --image "$ANCHORED" --root "$TREE" --ext ".md,.json")"
+  if grep -q "alpha-human" <<<"$out" && ! grep -q "beta-human" <<<"$out"; then
+    ok "auto-promote: unique neighbor anchors a duplicate basename"
+  else
+    bad "auto-promote duplicate" "HUMAN.MD was promoted from the wrong directory"
+  fi
 
   # ── dark theme: the case that made this unusable in practice ─────────────
   # 13px light-on-dark is what every dark editor theme actually looks like.
