@@ -9,10 +9,6 @@ names to find the real directories on disk, reads their authoritative contents,
 and puts a clean, labelled context bundle on your clipboard—ready to paste into
 any AI chat.
 
-![Point at a file tree and paste authoritative source context](assets/demo-public.gif)
-
-[Watch the full-quality MP4 demo](assets/demo-public.mp4)
-
 `Super+Shift+E` → choose a project → draw around the file tree → paste.
 
 No opening files one by one. No copying fragments. No trusting OCR to reproduce
