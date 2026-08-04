@@ -137,6 +137,32 @@ done
 
 log() { [[ $DEBUG -eq 1 ]] && echo "[snap-extract] $*" >&2 || true; }
 
+trim() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  printf '%s' "${value%"${value##*[![:space:]]}"}"
+}
+
+contains() {
+  local needle="$1" item
+  shift
+  for item in "$@"; do
+    [[ "$item" == "$needle" ]] && return 0
+  done
+  return 1
+}
+
+has_allowed_extension() {
+  local name="${1,,}" ext
+  local -a extensions
+  IFS=',' read -ra extensions <<< "$EXTS"
+  for ext in "${extensions[@]}"; do
+    ext="$(trim "$ext")"
+    [[ -n "$ext" && "$name" == *"${ext,,}" ]] && return 0
+  done
+  return 1
+}
+
 # Collection emits absolute paths (find echoes its starting point verbatim), but
 # resolve() looks names up as "$ROOT/$name". With a relative --folder the two
 # disagree and every file comes back unresolved. Canonicalise up front so both
@@ -252,13 +278,13 @@ identify_via_tesseract() {
   # found plenty. Once preprocessing works, the recovery branch matching
   # nothing is the *normal* case, so this is not a corner case at all.
   local primary recovered
-  primary="$(grep -oE "[A-Za-z0-9][A-Za-z0-9_.+-]{0,100}(${ext_regex})" <<<"$raw" || true)"
+  primary="$(grep -oiE "[A-Za-z0-9][A-Za-z0-9_.+-]{0,100}(${ext_regex})" <<<"$raw" || true)"
   # Dot recovery: "contractts" → "contract.ts". Also handles the variant where
   # OCR turns the dot into a space ("dark ts"). False positives are free — a
   # name that doesn't exist on disk is discarded downstream.
-  recovered="$(sed -E "s/([A-Za-z0-9])[[:space:]]+(${bare_regex})\b/\1.\2/g" <<<"$raw" \
-    | { grep -oE "[A-Za-z0-9][A-Za-z0-9_+-]{0,100}(${bare_regex})\b" || true; } \
-    | sed -E "s/(${bare_regex})$/.\1/" || true)"
+  recovered="$(sed -E "s/([A-Za-z0-9])[[:space:]]+(${bare_regex})\b/\1.\2/gI" <<<"$raw" \
+    | { grep -oiE "[A-Za-z0-9][A-Za-z0-9_+-]{0,100}(${bare_regex})\b" || true; } \
+    | sed -E "s/(${bare_regex})$/.\1/I" || true)"
 
   printf '%s\n%s\n' "$primary" "$recovered" | { grep -v '^[[:space:]]*$' || true; } | sort -u
 }
@@ -316,7 +342,7 @@ declare -a FILES=()
 declare -a PRUNE_EXPR=()
 IFS=',' read -ra PRUNE_ARR <<< "$PRUNE_DIRS"
 for d in "${PRUNE_ARR[@]}"; do
-  d="$(echo "$d" | xargs)"
+  d="$(trim "$d")"
   [[ -z "$d" ]] && continue
   [[ ${#PRUNE_EXPR[@]} -gt 0 ]] && PRUNE_EXPR+=(-o)
   PRUNE_EXPR+=(-name "$d")
@@ -329,14 +355,14 @@ collect_folder() {
   local -a ext_arr
   IFS=',' read -ra ext_arr <<< "$EXTS"
   for ext in "${ext_arr[@]}"; do
-    ext="$(echo "$ext" | xargs)"
+    ext="$(trim "$ext")"
     [[ -z "$ext" ]] && continue
     if [[ $RECURSIVE -eq 1 && ${#PRUNE_EXPR[@]} -gt 0 ]]; then
       find "$dir" -maxdepth "$depth" \
         \( "${PRUNE_EXPR[@]}" \) -prune -o \
-        -type f -name "*${ext}" -print 2>/dev/null
+        -type f -iname "*${ext}" -print 2>/dev/null
     else
-      find "$dir" -maxdepth "$depth" -type f -name "*${ext}" -print 2>/dev/null
+      find "$dir" -maxdepth "$depth" -type f -iname "*${ext}" -print 2>/dev/null
     fi
   done
 }
@@ -345,7 +371,78 @@ resolve_in_root_any_depth() {
   local name="$1"
   [[ -f "$ROOT/$name" ]] && { echo "$ROOT/$name"; return 0; }
   [[ -d "$ROOT" ]] || return 1
-  find "$ROOT" -maxdepth "$MAX_DEPTH" -type f -name "$name" -print -quit 2>/dev/null
+  find "$ROOT" -maxdepth "$MAX_DEPTH" -type f -iname "$name" -print -quit 2>/dev/null
+}
+
+resolve_all_in_root() {
+  local name="$1"
+  [[ -d "$ROOT" ]] || return 1
+  find "$ROOT" -maxdepth "$MAX_DEPTH" -type f -iname "$name" -print 2>/dev/null
+}
+
+promote_identified_files() {
+  [[ -d "$ROOT" ]] || return 0
+
+  local name directory candidate candidate_dir anchored file
+  local -a matches=() promoted_dirs=() ambiguous_names=()
+
+  # Unique filenames are reliable directory anchors. Defer common basenames
+  # such as index.ts and HUMAN.MD until those anchors are known.
+  for name in "${FILES[@]}"; do
+    mapfile -t matches < <(resolve_all_in_root "$name" || true)
+    [[ ${#matches[@]} -gt 0 ]] || continue
+    if [[ ${#matches[@]} -gt 1 ]]; then
+      ambiguous_names+=("$name")
+      log "auto-promote: $name has ${#matches[@]} matches; deferring"
+      continue
+    fi
+
+    directory="$(dirname "${matches[0]}")"
+    contains "$directory" "${promoted_dirs[@]}" || promoted_dirs+=("$directory")
+    log "auto-promote: $name → $directory"
+  done
+
+  # Prefer an already anchored directory for duplicate basenames. If the
+  # screenshot contains only a common basename, keep the first-match fallback
+  # so the simple one-file workflow still produces useful output.
+  for name in "${ambiguous_names[@]}"; do
+    mapfile -t matches < <(resolve_all_in_root "$name" || true)
+    anchored=""
+    for candidate in "${matches[@]}"; do
+      candidate_dir="$(dirname "$candidate")"
+      if contains "$candidate_dir" "${promoted_dirs[@]}"; then
+        anchored="$candidate_dir"
+        break
+      fi
+    done
+    if [[ -n "$anchored" ]]; then
+      log "auto-promote: $name → $anchored (anchored by unique name)"
+      continue
+    fi
+
+    directory="$(dirname "${matches[0]}")"
+    contains "$directory" "${promoted_dirs[@]}" || promoted_dirs+=("$directory")
+    log "auto-promote: $name → $directory (ambiguous fallback)"
+  done
+
+  [[ ${#promoted_dirs[@]} -gt 0 ]] || return 0
+
+  FILES=()
+  while IFS= read -r file; do
+    [[ -n "$file" ]] && FILES+=("$file")
+  done < <(
+    for directory in "${promoted_dirs[@]}"; do collect_folder "$directory"; done | sort -u
+  )
+
+  # Use the deepest common ancestor for concise, unambiguous output labels.
+  ROOT="${promoted_dirs[0]}"
+  for directory in "${promoted_dirs[@]}"; do
+    while [[ "$directory/" != "$ROOT/"* ]]; do
+      ROOT="$(dirname "$ROOT")"
+      [[ "$ROOT" == "/" ]] && break
+    done
+  done
+  log "promoted ${#promoted_dirs[@]} dir(s) → ${#FILES[@]} files, root=$ROOT"
 }
 
 case "$MODE" in
@@ -376,41 +473,9 @@ case "$MODE" in
       FILES+=("$name")
     done <<< "$raw"
 
-    # ── Auto-promote to folder mode ────────────────────────────────────────
-    # OCR only has to get *one* name right — disk is authoritative for the
-    # rest. Resolve every identified name, take the set of parent directories,
-    # and expand each through the same collector folder mode uses. Every name
-    # votes (not just the first to resolve), so a screenshot spanning several
-    # directories yields their union instead of whichever sorted first.
-    if [[ -d "$ROOT" ]]; then
-      declare -a PROMOTE_DIRS=()
-      for n in "${FILES[@]}"; do
-        resolved_for_promote="$(resolve_in_root_any_depth "$n" || true)"
-        [[ -n "$resolved_for_promote" && -f "$resolved_for_promote" ]] || continue
-        d="$(dirname "$resolved_for_promote")"
-        printf '%s\n' "${PROMOTE_DIRS[@]}" 2>/dev/null | grep -qxF "$d" && continue
-        PROMOTE_DIRS+=("$d")
-        log "auto-promote: $n → $d"
-      done
-      if [[ ${#PROMOTE_DIRS[@]} -gt 0 ]]; then
-        FILES=()
-        while IFS= read -r f; do
-          [[ -n "$f" ]] && FILES+=("$f")
-        done < <(
-          for d in "${PROMOTE_DIRS[@]}"; do collect_folder "$d"; done | sort -u
-        )
-        # Deepest common ancestor of the promoted dirs — keeps labels readable
-        # and gives resolve() a sane base when several dirs are in play.
-        ROOT="${PROMOTE_DIRS[0]}"
-        for d in "${PROMOTE_DIRS[@]}"; do
-          while [[ "$d/" != "$ROOT/"* ]]; do
-            ROOT="$(dirname "$ROOT")"
-            [[ "$ROOT" == "/" ]] && break
-          done
-        done
-        log "promoted ${#PROMOTE_DIRS[@]} dir(s) → ${#FILES[@]} files, root=$ROOT"
-      fi
-    fi
+    # OCR only needs one reliable name. Once a directory is identified, disk
+    # becomes authoritative and supplies the complete file list.
+    promote_identified_files
     ;;
   folder)
     [[ -d "$FOLDER" ]] || die 2 "folder not found: $FOLDER"
@@ -422,7 +487,7 @@ case "$MODE" in
   paths)
     IFS=',' read -ra P <<< "$PATHS"
     for p in "${P[@]}"; do
-      FILES+=("$(echo "$p" | xargs)")
+      FILES+=("$(trim "$p")")
     done
     ;;
   *)
@@ -458,7 +523,7 @@ matches_any_glob() {
   [[ -z "$patterns" ]] && return 1
   IFS=',' read -ra PATS <<< "$patterns"
   for pat in "${PATS[@]}"; do
-    pat="$(echo "$pat" | xargs)"
+    pat="$(trim "$pat")"
     # shellcheck disable=SC2053
     [[ "$name" == $pat ]] && return 0
     # In recursive mode names are relative paths — let "*.lock" still match
@@ -482,12 +547,7 @@ for name in "${FILES[@]}"; do
   fi
   # extension filter only applies in image/screenshot mode (folder mode pre-filtered)
   if [[ "$MODE" == "image" ]] || [[ "$MODE" == "paths" ]]; then
-    IFS=',' read -ra EXT_ARR <<< "$EXTS"
-    ok=0
-    for ext in "${EXT_ARR[@]}"; do
-      [[ "$name" == *"$ext" ]] && ok=1 && break
-    done
-    [[ $ok -eq 0 ]] && { SKIPPED+=("$name (ext-miss)"); continue; }
+    has_allowed_extension "$name" || { SKIPPED+=("$name (ext-miss)"); continue; }
   fi
   if path="$(resolve "$name")"; then
     RESOLVED+=("$path")
