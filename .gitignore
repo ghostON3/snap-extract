@@ -2,3 +2,8 @@
 *.tmp
 /tmp/
 .DS_Store
+
+# Private screen-recording masters. Only the sanitized demo-public assets are
+# safe to publish; regenerate them with contrib/demo/render-public-demo.sh.
+assets/demo.mp4
+assets/demo.gif

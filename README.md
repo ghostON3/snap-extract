@@ -1,22 +1,34 @@
 # snap-extract
 
-**Screenshot a file tree → its contents land in your clipboard.**
+## Point at code. Paste the real context.
 
-Drag a box around your editor's sidebar. OCR reads the filenames, the script
-reads those files from disk, concatenates them, and copies the result. Paste
-into any chat input.
+**The screenshot is a pointer, not the context.**
 
-Everything runs locally. No cloud calls, no API keys.
+Draw a box around the files visible in your editor. snap-extract uses those
+names to find the real directories on disk, reads their authoritative contents,
+and puts a clean, labelled context bundle on your clipboard—ready to paste into
+any AI chat.
+
+![Point at a file tree and paste authoritative source context](assets/demo-public.gif)
+
+[Watch the full-quality MP4 demo](assets/demo-public.mp4)
+
+`Super+Shift+E` → choose a project → draw around the file tree → paste.
+
+No opening files one by one. No copying fragments. No trusting OCR to reproduce
+your code. Everything runs locally: no cloud calls and no API keys.
+
+Try it directly from the shell:
 
 ```sh
 snap-extract.sh --screenshot --root ~/projects/my-app --ext ".ts,.md"
 ```
 
-Folder mode, no screenshot involved:
+Or copy a folder without taking a screenshot:
 
 ![snap-extract folder mode](assets/cli.gif)
 
-## The idea
+## Why the pointer works
 
 OCR on a file sidebar is unreliable — names get truncated with ellipses, narrow
 fonts get mangled, files scroll out of view. So snap-extract doesn't trust it.

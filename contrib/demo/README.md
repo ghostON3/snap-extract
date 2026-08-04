@@ -37,3 +37,19 @@ appear — then perform:
 
 Writes `assets/demo.mp4` (master) and `assets/demo.gif` (README). Keep it under
 20 seconds; pass `--width 700 --fps 12` if the GIF lands over 10 MB.
+
+## `render-public-demo.sh` → public README assets
+
+Treat `assets/demo.mp4` as a private master: a desktop recording can expose
+project names, source code, terminal history, browser chrome, or notifications.
+The public render uses explicit time cuts, anonymizes the editor footage, crops
+browser chrome, and adds the short product narrative used by the main README.
+
+```sh
+contrib/demo/render-public-demo.sh
+```
+
+It writes `assets/demo-public.mp4` and `assets/demo-public.gif` without changing
+either original recording. Review representative full-resolution frames before
+publishing whenever the source recording changes; crop coordinates and safe
+time ranges are recording-specific.
