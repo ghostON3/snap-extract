@@ -55,7 +55,8 @@ Dependencies:
 | clipboard           | `wl-clipboard` (`wl-copy`) | `xclip`          |
 | OCR                 | `tesseract` + a language pack             |
 | preprocessing       | `imagemagick` — strongly recommended, see Backends |
-| runtime             | `bash >= 4`, `python3` (vision backend only) |
+| conversations       | `tmux` — only for `--tmux`, see [flow 9](#9-screenshot-a-tmux-grid--every-conversation-in-it) |
+| runtime             | `bash >= 4`, `python3` (vision backend and `--tmux`) |
 
 Arch: `pacman -S grim slurp wl-clipboard tesseract tesseract-data-eng imagemagick`
 
@@ -146,6 +147,76 @@ than transcribe it. Requires a local Ollama; slow on CPU.
 snap-extract.sh --image /tmp/shot.png --root ~/proj --backend vision
 ```
 
+### 9. Screenshot a tmux grid → every conversation in it
+
+The same pointer trick, aimed at agents instead of files. Screenshot a tiled
+tmux layout and snap-extract reads the *session names* off the status bars,
+resolves each one to that pane's working directory, and reads the Claude Code
+transcript filed under it — the whole conversation, not the visible tail.
+
+```sh
+snap-extract.sh --screenshot --tmux
+```
+
+Use it when you have asked four agents the same question and want to hand all
+four answers to a fifth. Check what a screenshot resolved to before copying
+anything:
+
+```sh
+snap-extract.sh --screenshot --tmux --list
+```
+
+Names work without a screenshot too, and a session does not need to still be
+running — if its pane is gone, the transcript is still on disk and is matched
+by directory instead:
+
+```sh
+snap-extract.sh --sessions "elo-evo-v2,c-ghost-4" --turns 40
+snap-extract.sh --all-sessions --since 2h --format xml --output /tmp/ctx.md
+```
+
+Why this is the same idea as the file mode: a truncated status line
+(`branch: slot/ssh-temporal-ac…`) is exactly as useless as a truncated
+filename, and exactly as recoverable. One readable session name resolves to a
+directory, and the directory is authoritative. Tokens that are part of the
+status bar rather than anyone's session name — `claude`, `branch`, `ctx`,
+`main` — are barred from fuzzy matching, or the `1:claude*` in every pane
+would drag in every session with "claude" in its name.
+
+Transcripts are keyed by directory, not by session, so several panes parked in
+the same directory resolve to one conversation. It is emitted once, attributed
+to the pane actually running an agent, with the others listed as aliases.
+
+**These bundles are not like the file ones.** A transcript records someone
+working on their own machine: shell output, file contents, whatever was on
+screen. Secrets that match a known shape are masked by default (`--no-redact`
+opts out), but the only real control is scope — `--turns`, `--since`,
+`--tools none`. Look at `--output stdout` before you paste somewhere.
+
+| Flag | Default | Meaning |
+| ---- | ------- | ------- |
+| `--tmux` | — | identified names are tmux sessions, not files |
+| `--sessions "a,b"` | — | name sessions directly, no screenshot |
+| `--all-sessions` | — | every live tmux session |
+| `--list` | off | print the resolved table and exit |
+| `--turns N` | all | keep only the last N messages per session |
+| `--since DUR` | — | keep only messages newer than `30m` / `6h` / `3d` |
+| `--tools` | `summary` | `full`, `summary` (one line per call), or `none` |
+| `--thinking` | off | include assistant thinking blocks |
+| `--sidechains` | off | include subagent sidechains |
+| `--max-bytes N` | unlimited | truncate each session |
+| `--format` | `markdown` | `markdown`, `xml`, or `json` |
+| `--fallback` | `pane` | `pane` captures scrollback when there is no transcript; `none` skips |
+| `--scrollback N` | `2000` | lines of scrollback for that fallback |
+| `--store "GLOB"` | `$HOME/.claude*` | where transcripts live |
+| `--redact "re,re"` | — | extra regexes to mask |
+| `--no-redact` | off | disable the built-in secret masking |
+| `--ignore "a,b"` | — | extra status-bar words barred from fuzzy matching |
+
+Needs `python3`. A pane with no transcript at all (a plain shell, or a session
+older than the transcript store) falls back to its tmux scrollback, which is
+lossy and ANSI-stripped but beats dropping the pane silently.
+
 ### Filtering, in any flow
 
 ```sh
@@ -164,6 +235,7 @@ explicitly intend to place their contents on the clipboard.
 | Flag | Default | Meaning |
 | ---- | ------- | ------- |
 | `--screenshot` / `--image F` / `--folder D` / `--paths "a,b"` | — | input mode (pick one) |
+| `--tmux` / `--sessions "a,b"` / `--all-sessions` | — | read tmux conversations instead of files ([flow 9](#9-screenshot-a-tmux-grid--every-conversation-in-it)) |
 | `--root DIR` | `$PWD` | where filenames are resolved |
 | `--ext ".ts,.md"` | `.md` | extensions to include |
 | `-r`, `--recursive` | off | walk the whole tree, not just immediate children |
@@ -227,14 +299,23 @@ Then:
 | `Super+Shift+E` | menu opens; a notification lists your projects |
 | `s` | screenshot a file tree inside *strojx* |
 | `Shift+s` | copy the whole *strojx* tree — no screenshot |
+| `t` | screenshot a tmux grid, copy every conversation in it |
+| `Shift+t` | copy every live tmux session — no screenshot |
 | `Escape` or `q` | cancel |
+
+`t` is reserved: tmux conversations are not scoped to a repo, so the binding
+cannot come from the project registry. A project claiming `t` gets the usual
+duplicate-key warning and is skipped, so move it rather than losing it.
 
 Each generated binding carries `--notify`, so you get a desktop notification
 with the file count, size and a rough token estimate — without it a keybind
 launch is silent and you cannot tell success from failure.
 
 Everything is overridable by environment variable: `SNAPX_REGISTRY`,
-`SNAPX_OUTPUT`, `SNAPX_LEADER` (default `SUPER SHIFT, E`), `SNAPX_SCRIPT`.
+`SNAPX_OUTPUT`, `SNAPX_LEADER` (default `SUPER SHIFT, E`), `SNAPX_SCRIPT`,
+`SNAPX_TMUX_KEY` (default `t`; set it empty to drop the tmux bindings) and
+`SNAPX_TMUX_FLAGS` (default `--turns 60 --tools summary` — full transcripts
+with tool output run to megabytes and are useless in a browser tab).
 
 The leader is a single `exec` binding that shows the menu and enters the submap.
 Hyprland runs only the **first** bind registered for a key combination, so a

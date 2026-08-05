@@ -171,5 +171,137 @@ else
   skip "auto-promote" "needs tesseract + imagemagick"
 fi
 
+# ── tmux conversation mode ─────────────────────────────────────────────────
+# Driven entirely off a synthetic transcript store so it needs no tmux server
+# and touches none of the real ones. Names are resolved by the store-slug path,
+# which is the branch that matters most anyway: it is what recovers a session
+# whose tmux pane is already gone.
+if command -v python3 &>/dev/null; then
+  STORE="$TREE/store"
+  SLUG="-tmp-fixture-alphaproj"
+  mkdir -p "$STORE/projects/$SLUG"
+  NOW="$(date -u +%Y-%m-%dT%H:%M:%S.000Z)"
+  OLD="2020-01-01T00:00:00.000Z"
+  TRANSCRIPT="$STORE/projects/$SLUG/aaaa.jsonl"
+  {
+    printf '{"type":"user","cwd":"/tmp/fixture/alphaproj","gitBranch":"feat/x","timestamp":"%s","message":{"content":"ancient question"}}\n' "$OLD"
+    printf '{"type":"assistant","cwd":"/tmp/fixture/alphaproj","gitBranch":"feat/x","timestamp":"%s","message":{"content":[{"type":"text","text":"SENTINEL_REPLY"},{"type":"thinking","thinking":"SENTINEL_THOUGHT"}]}}\n' "$NOW"
+    printf '{"type":"assistant","cwd":"/tmp/fixture/alphaproj","timestamp":"%s","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"SENTINEL_CMD --flag"}}]}}\n' "$NOW"
+    printf '{"type":"user","cwd":"/tmp/fixture/alphaproj","timestamp":"%s","message":{"content":[{"type":"tool_result","content":"SENTINEL_OUTPUT"}]}}\n' "$NOW"
+    printf '{"type":"user","isSidechain":true,"cwd":"/tmp/fixture/alphaproj","timestamp":"%s","message":{"content":"SENTINEL_SIDECHAIN"}}\n' "$NOW"
+    printf '{"type":"user","cwd":"/tmp/fixture/alphaproj","timestamp":"%s","message":{"content":"key is sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV"}}\n' "$NOW"
+  } > "$TRANSCRIPT"
+
+  sess() { "$SCRIPT" --store "$STORE" --output stdout "$@" 2>/dev/null; }
+
+  out="$(sess --sessions alphaproj)"
+  if grep -q "SENTINEL_REPLY" <<<"$out" && grep -q "cwd: /tmp/fixture/alphaproj" <<<"$out"; then
+    ok "sessions: a dead session resolves through its transcript slug"
+  else
+    bad "sessions: slug resolution" "no transcript content in output"
+  fi
+
+  grep -q "branch: feat/x" <<<"$out" \
+    && ok "sessions: branch is read back out of the transcript" \
+    || bad "sessions: branch" "gitBranch missing from the header"
+
+  # Tool calls are one summary line by default: enough to follow what happened
+  # without dragging the tool's entire output into the paste.
+  if grep -q "SENTINEL_CMD" <<<"$out" && ! grep -q "SENTINEL_OUTPUT" <<<"$out"; then
+    ok "sessions: --tools summary keeps the call, drops the output"
+  else
+    bad "sessions: --tools summary" "expected the command but not its result"
+  fi
+
+  out="$(sess --sessions alphaproj --tools full)"
+  grep -q "SENTINEL_OUTPUT" <<<"$out" \
+    && ok "sessions: --tools full includes tool results" \
+    || bad "sessions: --tools full" "tool result missing"
+
+  out="$(sess --sessions alphaproj --tools none)"
+  ! grep -q "SENTINEL_CMD" <<<"$out" \
+    && ok "sessions: --tools none drops tool calls entirely" \
+    || bad "sessions: --tools none" "tool call survived"
+
+  out="$(sess --sessions alphaproj)"
+  ! grep -q "SENTINEL_THOUGHT" <<<"$out" \
+    && ok "sessions: thinking is excluded by default" \
+    || bad "sessions: thinking" "thinking block leaked into the bundle"
+
+  out="$(sess --sessions alphaproj --thinking)"
+  grep -q "SENTINEL_THOUGHT" <<<"$out" \
+    && ok "sessions: --thinking includes it" \
+    || bad "sessions: --thinking" "thinking block missing"
+
+  out="$(sess --sessions alphaproj)"
+  ! grep -q "SENTINEL_SIDECHAIN" <<<"$out" \
+    && ok "sessions: sidechains are excluded by default" \
+    || bad "sessions: sidechains" "sidechain leaked into the bundle"
+
+  # A transcript is a recording of someone's own machine. Anything that looks
+  # like a credential must not survive into something headed for a browser tab.
+  out="$(sess --sessions alphaproj)"
+  if ! grep -q "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV" <<<"$out" && grep -q "sk-ant-<redacted>" <<<"$out"; then
+    ok "sessions: secrets are masked by default"
+  else
+    bad "sessions: redaction" "an API key survived into the output"
+  fi
+
+  out="$(sess --sessions alphaproj --no-redact)"
+  grep -q "sk-ant-api03-ABCDEFGHIJKLMNOPQRSTUV" <<<"$out" \
+    && ok "sessions: --no-redact is honoured" \
+    || bad "sessions: --no-redact" "still masked after opting out"
+
+  out="$(sess --sessions alphaproj --turns 1)"
+  [[ "$(grep -c '^--- ' <<<"$out")" == "1" ]] \
+    && ok "sessions: --turns keeps only the last N messages" \
+    || bad "sessions: --turns" "expected 1 message, got $(grep -c '^--- ' <<<"$out")"
+
+  out="$(sess --sessions alphaproj --since 1h)"
+  if grep -q "SENTINEL_REPLY" <<<"$out" && ! grep -q "ancient question" <<<"$out"; then
+    ok "sessions: --since drops messages older than the window"
+  else
+    bad "sessions: --since" "time filter did not apply"
+  fi
+
+  sess --sessions alphaproj --format json | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)[0]["cwd"]=="/tmp/fixture/alphaproj" else 1)' \
+    && ok "sessions: --format json emits parseable JSON" \
+    || bad "sessions: --format json" "output did not parse"
+
+  sess --sessions alphaproj --format json --max-bytes 40 | python3 -c 'import json,sys; json.load(sys.stdin)' \
+    && ok "sessions: --max-bytes leaves JSON parseable" \
+    || bad "sessions: --max-bytes json" "truncation produced invalid JSON"
+
+  # Transcripts are keyed by directory, so several names can land on one file.
+  # It must appear once, not once per name.
+  out="$(sess --sessions "alphaproj,alphapro")"
+  [[ "$(grep -c '^=== session' <<<"$out")" == "1" ]] \
+    && ok "sessions: one transcript is emitted once, not once per name" \
+    || bad "sessions: dedupe" "got $(grep -c '^=== session' <<<"$out") sections for one transcript"
+
+  grep -q "also open in:" <<<"$out" \
+    && ok "sessions: the deduped names are still recorded as aliases" \
+    || bad "sessions: aliases" "collapsed names vanished from the output"
+
+  # "claude" appears in every pane's status line; it must never fuzzy-match.
+  mkdir -p "$STORE/projects/-tmp-fixture-claudeproj"
+  cp "$TRANSCRIPT" "$STORE/projects/-tmp-fixture-claudeproj/bbbb.jsonl"
+  "$SCRIPT" --store "$STORE" --sessions "claude" --output stdout &>/dev/null
+  [[ $? -ne 0 ]] \
+    && ok "sessions: status-bar chrome does not fuzzy-match a session" \
+    || bad "sessions: chrome" "the bare word 'claude' pulled in a session"
+
+  "$SCRIPT" --store "$STORE" --sessions alphaproj --list &>/dev/null \
+    && ok "sessions: --list exits zero" \
+    || bad "sessions: --list" "non-zero exit"
+
+  "$SCRIPT" --store "$STORE" --sessions "definitely-not-a-session-xyz" --output stdout &>/dev/null
+  [[ $? -eq 3 ]] \
+    && ok "sessions: an unresolvable name exits 3" \
+    || bad "sessions: unresolvable" "expected exit 3"
+else
+  skip "tmux conversation mode" "needs python3"
+fi
+
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]

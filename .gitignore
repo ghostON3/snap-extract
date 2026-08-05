@@ -6,3 +6,5 @@
 # Private screen-recording masters; do not publish them from this repository.
 assets/demo.mp4
 assets/demo.gif
+__pycache__/
+*.pyc

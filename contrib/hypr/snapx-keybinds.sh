@@ -17,6 +17,14 @@ REGISTRY="${SNAPX_REGISTRY:-$HOME/.config/snap-extract/projects.conf}"
 OUTPUT="${SNAPX_OUTPUT:-$HOME/.config/hypr/conf.d/snap-extract.conf}"
 LEADER="${SNAPX_LEADER:-SUPER SHIFT, E}"
 MENU_SCRIPT="${SNAPX_MENU_SCRIPT:-$HOME/.config/snap-extract/snapx-menu.sh}"
+
+# The tmux conversation binding is not a project — it is not scoped to a repo,
+# so it cannot live in the registry. It gets one reserved key instead. Set
+# SNAPX_TMUX_KEY to empty to leave it out entirely.
+TMUX_KEY="${SNAPX_TMUX_KEY-t}"
+# Defaults chosen to stay pasteable: a full transcript with tool output can run
+# to megabytes, which is useless in a browser tab and slow to put on a clipboard.
+TMUX_FLAGS="${SNAPX_TMUX_FLAGS:---turns 60 --tools summary}"
 SCRIPT="${SNAPX_SCRIPT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/snap-extract.sh}"
 
 [[ -f "$REGISTRY" ]] || {
@@ -34,6 +42,11 @@ trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; printf '%s' "${s%"${s##*[
 
 declare -a BINDS=() MENU=() WARNINGS=()
 declare -A SEEN=()
+
+# Claim the tmux key before the registry is read, so a project that wants the
+# same letter gets the normal duplicate-key warning rather than silently
+# shadowing a binding that was written later.
+[[ -n "$TMUX_KEY" ]] && SEEN["$TMUX_KEY"]="tmux conversations"
 
 while IFS= read -r line || [[ -n "$line" ]]; do
   line="${line%%#*}"
@@ -65,6 +78,18 @@ while IFS= read -r line || [[ -n "$line" ]]; do
   MENU+=("$key  $label")
 done < "$REGISTRY"
 
+# tmux conversations: screenshot a tiled grid and copy the whole conversation
+# behind every pane in it. SHIFT skips the screenshot and takes every live
+# session. No --root, because these are resolved through tmux and the
+# transcript store rather than through a project directory.
+if [[ -n "$TMUX_KEY" ]]; then
+  BINDS+=("# tmux conversations")
+  BINDS+=("bind = , $TMUX_KEY, exec, hyprctl dispatch submap reset && $SCRIPT --screenshot --tmux $TMUX_FLAGS --notify")
+  BINDS+=("bind = SHIFT, $TMUX_KEY, exec, hyprctl dispatch submap reset && $SCRIPT --all-sessions $TMUX_FLAGS --notify")
+  MENU+=("$TMUX_KEY  tmux conversations")
+  command -v tmux &>/dev/null || WARNINGS+=("tmux is not installed — the '$TMUX_KEY' binding will fail until it is")
+fi
+
 [[ ${#MENU[@]} -gt 0 ]] || { echo "registry has no usable entries" >&2; exit 2; }
 
 # Hyprland fires only the FIRST bind registered for a key combination. Emitting
@@ -82,7 +107,11 @@ mkdir -p "$(dirname "$MENU_SCRIPT")"
   echo "notify-send -a snap-extract -t 4000 'snap-extract — pick a project' \"\$(cat <<'MENU'"
   printf '%s\n' "${MENU[@]}"
   echo
-  echo "SHIFT+key = whole tree"
+  if [[ -n "$TMUX_KEY" ]]; then
+    echo "SHIFT+key = whole tree  ($TMUX_KEY: all live sessions)"
+  else
+    echo "SHIFT+key = whole tree"
+  fi
   echo "Esc = cancel"
   echo "MENU"
   echo ")\""

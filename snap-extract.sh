@@ -26,6 +26,29 @@ MAX_DEPTH=8
 RECURSIVE=0
 DEBUG=0
 NOTIFY=0
+
+# ── tmux / conversation target ──────────────────────────────────────────────
+# TARGET switches what an identified name means. "files" is the original
+# behaviour; "sessions" treats each name as a tmux session and resolves it to
+# the Claude Code transcript for that pane's working directory.
+TARGET="files"
+SESSIONS=""
+ALL_SESSIONS=0
+LIST_ONLY=0
+STORES="${HOME}/.claude*"
+TURNS=0
+TOOLS="summary"
+THINKING=0
+SIDECHAINS=0
+SINCE=""
+FALLBACK="pane"
+SCROLLBACK=2000
+MAX_BYTES=0
+REDACT=""
+NO_REDACT=0
+FORMAT="markdown"
+ALL_TRANSCRIPTS=0
+IGNORE_WORDS=""
 # Directories never worth concatenating — pruned in recursive folder mode.
 PRUNE_DIRS=".git,node_modules,dist,build,out,.next,.turbo,.svelte-kit,coverage,__pycache__,.venv,venv,target,vendor"
 
@@ -75,6 +98,44 @@ OPTIONS
                       compositor keybinds, where there is no terminal to read.
   -h, --help          This text.
 
+TMUX CONVERSATION MODE
+  Same pointer trick, different target: instead of filenames, the screenshot
+  is read for tmux session names. Each one that matches a live session is
+  resolved to that pane's working directory, and the Claude Code transcript
+  for that directory is read from disk. Truncated status lines do not matter.
+
+  --tmux              Identified names are tmux sessions, not files. Combine
+                      with --screenshot, --image, or --paths.
+  --sessions "a,b"    Use these session names directly (implies --tmux).
+  --all-sessions      Every live tmux session (implies --tmux).
+  --list              Print the resolved session -> cwd -> transcript table
+                      and exit. Use this to check a selection before copying.
+
+  --store "GLOB"      Where transcripts live. Default: $HOME/.claude*
+                      Comma-separated; each entry may be a glob.
+  --all-transcripts   Every transcript for a directory, not just the newest.
+
+  --turns N           Keep only the last N messages per session. 0 = all.
+  --since DUR         Keep only messages newer than DUR (30m, 6h, 3d).
+  --tools MODE        full | summary (default) | none. Controls how much of
+                      each tool call is kept. "full" includes tool output and
+                      gets very large; "summary" keeps one line per call.
+  --thinking          Include assistant thinking blocks. Off by default.
+  --sidechains        Include subagent sidechains. Off by default.
+  --max-bytes N       Truncate each session to N bytes. 0 = unlimited.
+
+  --fallback MODE     pane (default) | none. What to do for a session with no
+                      transcript: capture the tmux scrollback, or skip it.
+  --scrollback N      Lines of scrollback for the pane fallback. Default: 2000
+
+  --redact "re,re"    Extra regexes to mask (Python syntax).
+  --no-redact         Disable the built-in secret masking. Off by default,
+                      meaning secrets ARE masked unless you pass this.
+  --format FMT        markdown (default) | xml | json
+  --ignore "a,b"      Extra status-bar words that must never fuzzy-match a
+                      session name. Built-ins already cover claude, branch,
+                      ctx, dir, main and similar chrome.
+
 EXAMPLES
   # Screenshot your editor's file tree into the clipboard
   snap-extract.sh --screenshot --root ~/projects/app --ext ".ts,.tsx"
@@ -90,6 +151,18 @@ EXAMPLES
 
   # Skip tests
   snap-extract.sh --folder ~/projects/app -r --ext .ts --exclude "*.test.ts"
+
+  # Screenshot a tmux grid, copy every conversation in it
+  snap-extract.sh --screenshot --tmux
+
+  # Check what a screenshot resolved to before copying anything
+  snap-extract.sh --screenshot --tmux --list
+
+  # Two named sessions, last 40 messages each, tool calls dropped
+  snap-extract.sh --sessions "elo-evo-v2,c-ghost-4" --turns 40 --tools none
+
+  # Everything from the last two hours, as XML, to a file
+  snap-extract.sh --all-sessions --since 2h --format xml --output /tmp/ctx.xml
 
 HOW THE SCREENSHOT WORKS
   --screenshot runs slurp: the cursor becomes a crosshair. Drag a rectangle
@@ -123,6 +196,24 @@ while [[ $# -gt 0 ]]; do
     --prune)       PRUNE_DIRS="$2"; shift 2 ;;
     --debug)       DEBUG=1; shift ;;
     --notify)      NOTIFY=1; shift ;;
+    --tmux)        TARGET="sessions"; shift ;;
+    --sessions)    TARGET="sessions"; SESSIONS="$2"; shift 2 ;;
+    --all-sessions) TARGET="sessions"; ALL_SESSIONS=1; shift ;;
+    --list)        LIST_ONLY=1; shift ;;
+    --store)       STORES="$2"; shift 2 ;;
+    --all-transcripts) ALL_TRANSCRIPTS=1; shift ;;
+    --turns)       TURNS="$2"; shift 2 ;;
+    --since)       SINCE="$2"; shift 2 ;;
+    --tools)       TOOLS="$2"; shift 2 ;;
+    --thinking)    THINKING=1; shift ;;
+    --sidechains)  SIDECHAINS=1; shift ;;
+    --max-bytes)   MAX_BYTES="$2"; shift 2 ;;
+    --fallback)    FALLBACK="$2"; shift 2 ;;
+    --scrollback)  SCROLLBACK="$2"; shift 2 ;;
+    --redact)      REDACT="$2"; shift 2 ;;
+    --no-redact)   NO_REDACT=1; shift ;;
+    --ignore)      IGNORE_WORDS="$2"; shift 2 ;;
+    --format)      FORMAT="$2"; shift 2 ;;
     -h|--help)     usage 0 ;;
     *)
       echo "snap-extract: unknown argument: $1" >&2
@@ -195,6 +286,14 @@ die() {
   exit "$code"
 }
 
+# --sessions and --all-sessions name their input outright, so they are input
+# modes in their own right and must not trip the "pick an input mode" error.
+if [[ "$TARGET" == "sessions" && -z "$MODE" ]]; then
+  if [[ $ALL_SESSIONS -eq 1 || -n "$SESSIONS" ]]; then
+    MODE="sessions"
+  fi
+fi
+
 # ── Step 1: get an image (if needed) ────────────────────────────────────────
 if [[ "$MODE" == "screenshot" ]]; then
   IMAGE="$(mktemp --suffix=.png)"
@@ -265,6 +364,14 @@ identify_via_tesseract() {
   rm -f "$prepped"
   [[ -n "${raw//[[:space:]]/}" ]] || return 2
 
+  # Session mode does its own token extraction and filters against the tmux
+  # session list, so the extension machinery below would throw away every
+  # candidate before it got the chance. Hand back the raw read.
+  if [[ "$TARGET" == "sessions" ]]; then
+    printf '%s\n' "$raw"
+    return 0
+  fi
+
   # Build a regex from --ext (".md,.sh" → "\.md|\.sh") and extract tokens
   # that look like file names (basename + extension). Limit to plausible
   # name chars to avoid pulling whole sentences.
@@ -330,6 +437,134 @@ except Exception as e:
     print(f'VISION_ERROR: {e}', file=sys.stderr)
     sys.exit(2)
 PYEOF
+}
+
+# ── tmux session resolution ─────────────────────────────────────────────────
+# The file pipeline resolves a name by looking for it on disk. The session
+# pipeline resolves a name by looking for it in `tmux list-sessions`, which is
+# just as authoritative and just as intolerant of OCR noise: a misread token
+# matches nothing and is silently dropped, exactly like an unresolvable
+# filename. Matching widens in stages so a status line truncated to
+# "ssh-temporal-ac…" still lands.
+
+tmux_available() { command -v tmux &>/dev/null && tmux list-sessions &>/dev/null; }
+
+# name -> "cwd<TAB>1|0", where the flag says whether a pane in this session is
+# actually running an agent. A session's claude process is not always in pane 0,
+# so prefer a pane running one.
+#
+# The flag matters because a transcript is keyed by directory, not by session:
+# every shell sitting in $HOME resolves to the same $HOME conversation. Knowing
+# which of them is the one that actually held it is the difference between one
+# labelled conversation and six copies attributed to sessions that never had it.
+session_pane_info() {
+  local s="$1" line panes
+  panes="$(tmux list-panes -t "$s" -F '#{pane_current_command}	#{pane_current_path}' 2>/dev/null || true)"
+  line="$(grep -m1 -E '^claude	' <<<"$panes" || true)"
+  if [[ -n "$line" ]]; then
+    printf '%s\t1' "${line#*	}"
+    return 0
+  fi
+  line="$(head -1 <<<"$panes")"
+  printf '%s\t0' "${line#*	}"
+}
+
+# Lowercase, drop anything that is not alphanumeric. Survives the OCR turning
+# a hyphen into an em dash, or eating it entirely.
+#
+# Writes through a named variable rather than echoing. A screenshot yields a
+# couple of hundred candidate tokens and a busy machine has north of a thousand
+# transcript directories; at one subshell per comparison that product is a
+# quarter of a million forks, which takes minutes. Fork-free, it is instant.
+norm_into() {
+  local __v="${2,,}"
+  printf -v "$1" '%s' "${__v//[^a-z0-9]/}"
+}
+
+# Normalised views of the two haystacks, built once. SLUG_NORMS is parallel to
+# SLUG_PATHS.
+declare -a SESSION_NORMS=() SLUG_NORMS=() SLUG_PATHS=()
+
+build_match_tables() {
+  local s d slug n
+  for s in ${ALL_SESSION_NAMES[@]+"${ALL_SESSION_NAMES[@]}"}; do
+    norm_into n "$s"
+    SESSION_NORMS+=("$n")
+  done
+  for d in "${STORE_DIRS[@]}"; do
+    [[ -d "$d" ]] || continue
+    for slug in "$d"/*/; do
+      slug="${slug%/}"; slug="${slug##*/}"
+      [[ "$slug" == "*" ]] && continue
+      norm_into n "$slug"
+      SLUG_NORMS+=("$n")
+      SLUG_PATHS+=("$d/$slug")
+    done
+  done
+  log "match tables: ${#SESSION_NORMS[@]} sessions, ${#SLUG_PATHS[@]} transcript dirs"
+}
+
+# Words that are part of the status bar itself rather than anything anyone
+# named. Every pane running an agent prints "1:claude*", so the bare token
+# "claude" is in every screenshot — and it is a substring of any session called
+# c-claude-4, which would then be pulled into every bundle. Chrome is still
+# allowed to match a session *exactly*, because a session really can be called
+# "main"; it is only barred from the fuzzy stages, where it means nothing.
+CHROME="claude,branch,ctx,dir,main,master,bypass,permissions,agent,agents,node,zsh,bash,fish,git,session,sessions,window,windows,pane,panes,tokens,token,aug,jan,feb,mar,apr,jun,jul,sep,oct,nov,dec"
+IGNORE="${IGNORE_WORDS:-}"
+
+is_chrome() {
+  local n="$1" w nw
+  IFS=',' read -ra __CH <<< "$CHROME,$IGNORE"
+  for w in "${__CH[@]}"; do
+    norm_into nw "$(trim "$w")"
+    [[ -n "$nw" && "$nw" == "$n" ]] && return 0
+  done
+  return 1
+}
+
+# Exact, then prefix (truncation), then substring either way. The first stage
+# that yields anything wins, so a whole session is never dragged in by a short
+# fragment that happens to appear inside its name.
+match_session() {
+  local nwant i
+  norm_into nwant "$1"
+  [[ ${#nwant} -ge 3 ]] || return 1
+  local chrome=0
+  is_chrome "$nwant" && chrome=1
+  local -a exact=() prefix=() infix=()
+  for i in "${!SESSION_NORMS[@]}"; do
+    local ns="${SESSION_NORMS[$i]}"
+    if [[ "$ns" == "$nwant" ]]; then exact+=("${ALL_SESSION_NAMES[$i]}")
+    elif [[ $chrome -eq 1 ]]; then continue
+    elif [[ "$ns" == "$nwant"* || "$nwant" == "$ns"* ]]; then prefix+=("${ALL_SESSION_NAMES[$i]}")
+    elif [[ "$ns" == *"$nwant"* || "$nwant" == *"$ns"* ]]; then infix+=("${ALL_SESSION_NAMES[$i]}")
+    fi
+  done
+  if   [[ ${#exact[@]}  -gt 0 ]]; then printf '%s\n' "${exact[@]}"
+  elif [[ ${#prefix[@]} -gt 0 ]]; then printf '%s\n' "${prefix[@]}"
+  elif [[ ${#infix[@]}  -gt 0 ]]; then printf '%s\n' "${infix[@]}"
+  else return 1; fi
+}
+
+# A pane whose session has since been killed still has its transcript on disk,
+# filed under a slug derived from its directory. Matching the OCR'd name
+# against those slugs recovers conversations tmux can no longer account for —
+# the usual fate of the finished worktree in a screenshot.
+match_store_slug() {
+  local nwant i
+  norm_into nwant "$1"
+  # Short fragments substring-match half the store. Demand a real name.
+  [[ ${#nwant} -ge 6 ]] || return 1
+  is_chrome "$nwant" && return 1
+  local -a hits=()
+  for i in "${!SLUG_NORMS[@]}"; do
+    [[ "${SLUG_NORMS[$i]}" == *"$nwant"* ]] && hits+=("${SLUG_PATHS[$i]}")
+  done
+  [[ ${#hits[@]} -gt 0 ]] || return 1
+  # The slug is a lossy encoding of the path (every separator became "-"), so
+  # it is never decoded back; the real cwd is read out of the transcript.
+  printf '%s\n' "${hits[@]}"
 }
 
 declare -a FILES=()
@@ -462,20 +697,40 @@ case "$MODE" in
     esac
     log "raw identification output:"
     log "$raw"
-    fence_char=$'\x60'  # backtick — code-fence sentinel from markdown output
-    while IFS= read -r name; do
-      name="$(echo "$name" | sed -E 's/^[[:space:]]*[-•*]?[[:space:]]*//; s/[[:space:]]+$//')"
-      [[ -z "$name" ]] && continue
-      # Strip markdown code-fence lines, horizontal rules, heading underlines.
-      [[ "${name:0:1}" == "$fence_char" ]] && continue
-      [[ "$name" =~ ^---+$ ]] && continue
-      [[ "$name" =~ ^===+$ ]] && continue
-      FILES+=("$name")
-    done <<< "$raw"
 
-    # OCR only needs one reliable name. Once a directory is identified, disk
-    # becomes authoritative and supplies the complete file list.
-    promote_identified_files
+    # In session mode the extension regex is meaningless — a tmux status line
+    # has no file extensions in it. Take every token that could plausibly be a
+    # session name and let the tmux/store lookup do the filtering, the same way
+    # the file pipeline lets the filesystem do it.
+    if [[ "$TARGET" == "sessions" ]]; then
+      while IFS= read -r name; do
+        name="$(trim "$name")"
+        [[ -n "$name" ]] && FILES+=("$name")
+      done < <(grep -oE '[A-Za-z][A-Za-z0-9_.-]{2,60}' <<<"$raw" | sort -u)
+      log "session-name candidates: ${#FILES[@]}"
+    else
+      fence_char=$'\x60'  # backtick — code-fence sentinel from markdown output
+      while IFS= read -r name; do
+        name="$(echo "$name" | sed -E 's/^[[:space:]]*[-•*]?[[:space:]]*//; s/[[:space:]]+$//')"
+        [[ -z "$name" ]] && continue
+        # Strip markdown code-fence lines, horizontal rules, heading underlines.
+        [[ "${name:0:1}" == "$fence_char" ]] && continue
+        [[ "$name" =~ ^---+$ ]] && continue
+        [[ "$name" =~ ^===+$ ]] && continue
+        FILES+=("$name")
+      done <<< "$raw"
+
+      # OCR only needs one reliable name. Once a directory is identified, disk
+      # becomes authoritative and supplies the complete file list.
+      promote_identified_files
+    fi
+    ;;
+  sessions)
+    IFS=',' read -ra S <<< "$SESSIONS"
+    for s in "${S[@]}"; do
+      s="$(trim "$s")"
+      [[ -n "$s" ]] && FILES+=("$s")
+    done
     ;;
   folder)
     [[ -d "$FOLDER" ]] || die 2 "folder not found: $FOLDER"
@@ -491,13 +746,144 @@ case "$MODE" in
     done
     ;;
   *)
-    echo "snap-extract: pick an input mode — --screenshot, --folder, --paths, or --image" >&2
+    echo "snap-extract: pick an input mode — --screenshot, --folder, --paths, --image, --sessions, or --all-sessions" >&2
     echo >&2
     usage 2
     ;;
 esac
 
-if [[ ${#FILES[@]} -eq 0 ]]; then
+# ── Session pipeline ────────────────────────────────────────────────────────
+# Runs instead of steps 3 and 4 when --tmux is in play. Produces the same
+# $out_tmp the file pipeline does, so step 5 (output, report, notify) is shared.
+if [[ "$TARGET" == "sessions" ]]; then
+  command -v python3 &>/dev/null || die 2 "python3 required" "Transcript rendering needs python3."
+
+  # Expand --store globs once. Unmatched globs must not survive as literals.
+  declare -a STORE_DIRS=()
+  IFS=',' read -ra STORE_PATTERNS <<< "$STORES"
+  for pat in "${STORE_PATTERNS[@]}"; do
+    pat="$(trim "$pat")"
+    [[ -z "$pat" ]] && continue
+    for d in $(eval echo "$pat" 2>/dev/null); do
+      [[ -d "$d/projects" ]] && STORE_DIRS+=("$d/projects")
+      [[ -d "$d" && "$(basename "$d")" == "projects" ]] && STORE_DIRS+=("$d")
+    done
+  done
+  [[ ${#STORE_DIRS[@]} -gt 0 ]] || die 3 "no transcript store found" \
+    "Looked for projects/ under: $STORES. Point --store somewhere else."
+  log "stores: ${STORE_DIRS[*]}"
+
+  declare -a ALL_SESSION_NAMES=()
+  if tmux_available; then
+    mapfile -t ALL_SESSION_NAMES < <(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+  fi
+  log "live tmux sessions: ${#ALL_SESSION_NAMES[@]}"
+  build_match_tables
+
+  # name<TAB>cwd<TAB>store-dir-or-empty, deduped by the pair that follows.
+  declare -a PICKED=()
+  declare -a SESSION_SKIPPED=()
+
+  # Empty-array expansion is only safe under `set -u` from bash 4.4 on, and the
+  # README promises bash 4. Guard every expansion that can legitimately be empty.
+  add_pick() {
+    local entry="$1"
+    contains "$entry" ${PICKED[@]+"${PICKED[@]}"} || PICKED+=("$entry")
+  }
+
+  if [[ $ALL_SESSIONS -eq 1 ]]; then
+    tmux_available || die 3 "no tmux server" "--all-sessions needs a running tmux."
+    for s in "${ALL_SESSION_NAMES[@]}"; do
+      IFS=$'\t' read -r pcwd pagent <<< "$(session_pane_info "$s")"
+      add_pick "$s	$pcwd		$pagent"
+    done
+  else
+    for name in "${FILES[@]}"; do
+      hit=0
+      while IFS= read -r s; do
+        [[ -z "$s" ]] && continue
+        IFS=$'\t' read -r pcwd pagent <<< "$(session_pane_info "$s")"
+        add_pick "$s	$pcwd		$pagent"
+        hit=1
+        log "session match: $name → $s"
+      done < <(match_session "$name" || true)
+      if [[ $hit -eq 0 ]]; then
+        # No live session. The transcript may still be on disk under a slug.
+        while IFS= read -r slugdir; do
+          [[ -z "$slugdir" ]] && continue
+          add_pick "$name		$slugdir	0"
+          hit=1
+          log "store match: $name → $slugdir"
+        done < <(match_store_slug "$name" || true)
+      fi
+      [[ $hit -eq 0 ]] && SESSION_SKIPPED+=("$name (no session or transcript)")
+    done
+  fi
+
+  [[ ${#PICKED[@]} -gt 0 ]] || die 3 "no sessions identified" \
+    "${#FILES[@]} name(s) read, none matched a tmux session or transcript directory. Re-run with --debug, or name them with --sessions."
+
+  manifest="$(mktemp)"
+  printf '%s\n' "${PICKED[@]}" > "$manifest"
+  misses="$(mktemp)"
+  out_tmp="$(mktemp)"
+
+  SNAP_MANIFEST="$manifest" SNAP_MISSES="$misses" \
+  SNAP_STORES="$(printf '%s\n' "${STORE_DIRS[@]}")" \
+  SNAP_TURNS="$TURNS" SNAP_TOOLS="$TOOLS" SNAP_THINKING="$THINKING" \
+  SNAP_SIDECHAINS="$SIDECHAINS" SNAP_SINCE="$SINCE" SNAP_FORMAT="$FORMAT" \
+  SNAP_MAXBYTES="$MAX_BYTES" SNAP_REDACT="$REDACT" SNAP_NOREDACT="$NO_REDACT" \
+  SNAP_ALL_TRANSCRIPTS="$ALL_TRANSCRIPTS" SNAP_LIST="$LIST_ONLY" SNAP_DEBUG="$DEBUG" \
+    python3 "$(dirname "$0")/lib/render_sessions.py" > "$out_tmp" || {
+      rm -f "$manifest" "$misses"
+      die 3 "transcript rendering failed" "Re-run with --debug for the traceback."
+    }
+
+  # Sessions with no transcript: fall back to the pane's scrollback if asked.
+  # Lossy and ANSI-stripped, but a shell pane or a pre-transcript session is
+  # otherwise invisible, and silently dropping it reads as "there was nothing".
+  declare -a RESOLVED=()
+  while IFS=$'\t' read -r sname scwd; do
+    [[ -z "$sname" ]] && continue
+    if [[ "$FALLBACK" == "pane" ]] && tmux_available \
+       && contains "$sname" ${ALL_SESSION_NAMES[@]+"${ALL_SESSION_NAMES[@]}"}; then
+      pane_txt="$(tmux capture-pane -p -J -S "-${SCROLLBACK}" -t "$sname" 2>/dev/null || true)"
+      pane_txt="$(sed -E 's/\x1b\[[0-9;?]*[a-zA-Z]//g' <<<"$pane_txt" | { grep -v '^[[:space:]]*$' || true; })"
+      if [[ -n "$pane_txt" ]]; then
+        {
+          printf '\n=== session: %s (tmux scrollback — no transcript matched) ===\n' "$sname"
+          printf 'cwd: %s\n\n' "$scwd"
+          printf '%s\n' "$pane_txt"
+        } >> "$out_tmp"
+        RESOLVED+=("$sname (scrollback)")
+        continue
+      fi
+    fi
+    SESSION_SKIPPED+=("$sname (no transcript)")
+  done < "$misses"
+
+  while IFS=$'\t' read -r sname spath; do
+    [[ -n "$sname" ]] && RESOLVED+=("$sname → $spath")
+  done < <({ grep -a '^#RESOLVED	' "$out_tmp" || true; } | cut -f2-)
+  # The markers are metadata for this loop, not part of the bundle.
+  sed -i '/^#RESOLVED\t/d' "$out_tmp"
+
+  rm -f "$manifest" "$misses"
+
+  if [[ $LIST_ONLY -eq 1 ]]; then
+    cat "$out_tmp"
+    { for s in "${SESSION_SKIPPED[@]}"; do printf '  ✗ %s\n' "$s"; done } >&2
+    rm -f "$out_tmp"
+    exit 0
+  fi
+
+  [[ -s "$out_tmp" ]] || { rm -f "$out_tmp"; die 3 "nothing to copy" \
+    "Sessions resolved but every transcript was empty after filtering. Loosen --turns/--since."; }
+
+  declare -a SKIPPED=("${SESSION_SKIPPED[@]}")
+fi
+
+if [[ "$TARGET" == "files" && ${#FILES[@]} -eq 0 ]]; then
   case "$MODE" in
     image) die 3 "nothing identified" "OCR found no names matching '$EXTS'. Re-run with --debug to see what it read." ;;
     *)     die 3 "nothing identified" "No '$EXTS' files under $ROOT. Add -r to recurse into subdirectories." ;;
@@ -534,6 +920,7 @@ matches_any_glob() {
   return 1
 }
 
+if [[ "$TARGET" == "files" ]]; then
 declare -a RESOLVED=()
 declare -a SKIPPED=()
 for name in "${FILES[@]}"; do
@@ -571,6 +958,7 @@ for p in "${RESOLVED[@]}"; do
   printf '\n=== %s ===\n\n' "$label" >> "$out_tmp"
   cat "$p" >> "$out_tmp"
 done
+fi
 
 bytes="$(wc -c < "$out_tmp")"
 lines="$(wc -l < "$out_tmp")"
@@ -598,7 +986,8 @@ esac
 
 # ── Report (stderr so stdout-mode stays clean) ──────────────────────────────
 {
-  echo "snap-extract: ${#RESOLVED[@]} files → $bytes bytes / $lines lines → $OUTPUT"
+  noun="files"; [[ "$TARGET" == "sessions" ]] && noun="sessions"
+  echo "snap-extract: ${#RESOLVED[@]} $noun → $bytes bytes / $lines lines → $OUTPUT"
   for p in "${RESOLVED[@]}"; do printf '  ✓ %s\n' "$p"; done
   for s in "${SKIPPED[@]}"; do printf '  ✗ %s\n' "$s"; done
 } >&2
@@ -611,7 +1000,7 @@ human_size="$(awk -v b="$bytes" 'BEGIN{ if (b<1024) printf "%d B", b;
 approx_tokens="$(awk -v b="$bytes" 'BEGIN{ t=b/4;
   if (t<1000) printf "%d", t; else printf "%.0fk", t/1000 }')"
 notify normal "snap-extract → ${OUTPUT}" \
-  "${#RESOLVED[@]} files · ${human_size} · ~${approx_tokens} tokens"
+  "${#RESOLVED[@]} ${noun} · ${human_size} · ~${approx_tokens} tokens"
 
 rm -f "$out_tmp"
 # Only clean up the screenshot we captured ourselves — a user-supplied

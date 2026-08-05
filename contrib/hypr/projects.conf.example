@@ -20,6 +20,13 @@
 #   SHIFT <key>    copy the project's whole tree, no screenshot
 #
 # Keep the letter mnemonic — you are choosing these to be muscle memory.
+#
+# "t" is reserved for tmux conversations and is not a project:
+#   t              screenshot a tmux grid, copy every conversation in it
+#   SHIFT t        copy every live tmux session, no screenshot
+# Give it a different letter with SNAPX_TMUX_KEY=g, or free it with
+# SNAPX_TMUX_KEY= (empty) to drop the binding entirely. Tune what it copies
+# with SNAPX_TMUX_FLAGS, default "--turns 60 --tools summary".
 
 s | strojx      | ~/projects/strojx           | .ts,.tsx,.json,.md | --exclude "*.test.ts"
 e | elo v2      | ~/projects/elo-evolution-v2 | .ts,.tsx,.md
